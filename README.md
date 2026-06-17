@@ -189,6 +189,74 @@ Z.AI 在 2026 年 5 月上线了阿里云滑动验证码（AliyunCaptcha），�
 
 设了 `REDIS_URL` 时，captcha token 还会被 Redis 缓存（多实例共享）。
 
+> ⚠️ **Captcha 后端必填**：z.ai 强制校验 captcha，必须至少设置 `CAPTCHA_FULL_PROXY_URL`（推荐）或 `CAPTCHA_PROVIDER_URL`。**两个都不设 → 所有请求必将返回 `FRONTEND_CAPTCHA_REQUIRED`**。启动时会检测并告警。
+>
+> | 配置组合 | 行为 |
+> |---|---|
+> | 只设 `CAPTCHA_FULL_PROXY_URL` ✅ | 全代理（JSDOM 同环境拿 captcha），**推荐** |
+> | 只设 `CAPTCHA_PROVIDER_URL` | Go 直连 + 取 token 注入（易 F019） |
+> | **两个都不设** ❌ | Go 直连无 captcha，**必然失败** |
+> | 两个都设 | 全代理优先，`CAPTCHA_PROVIDER_URL` 仅用于 `/admin` 健康检查和回退 |
+
+## 📁 项目结构
+
+```
+zai2api/
+├── cmd/                        # 入口
+│   ├── main.go                 # 主服务：加载配置、初始化、注册路由
+│   └── register/               # 辅助工具（注册脚本）
+├── internal/                   # 业务逻辑
+│   ├── chat.go                 # 核心：OpenAI 兼容 chat completions 处理
+│   │                           #   含全代理分支(CAPTCHA_FULL_PROXY_URL)、Go 直连、
+│   │                           #   流式/非流式、工具调用、多模态、重试
+│   ├── config.go               # 配置（env 读取）
+│   ├── signature.go            # X-Signature 签名算法（HMAC-SHA256）
+│   ├── jwt.go                  # Z.AI JWT payload 解码
+│   ├── models.go               # 模型列表 + 请求/响应结构体 + OpenAI 类型定义
+│   ├── model_fetcher.go        # 模型映射（GetUpstreamConfig）+ 动态模型拉取
+│   ├── token_manager.go        # Z.AI token 池（轮询、校验、热加载）+ 统计
+│   ├── token_manager_admin.go  # token 后台增删（持久化走 storage 后端）
+│   ├── api_key_manager.go      # 客户端 API Key 管理（持久化走 storage 后端）
+│   ├── anonymous.go            # 匿名 token 池（无登录态时的兜底）
+│   ├── captcha.go              # 从 captcha-provider 取 captcha token（+Redis 缓存）
+│   ├── tools.go                # 工具调用：prompt 生成 + XML 解析（含 GLM-5.2 格式）
+│   ├── tools_native.go         # 工具消息转换
+│   ├── upload.go               # 图片/视频上传到 z.ai（拿 fileID）
+│   ├── tls_http.go             # tls-client（Chrome 指纹）HTTP 客户端
+│   ├── version.go              # 前端版本探测（X-FE-Version）
+│   ├── tokenizer.go            # token 计数
+│   ├── telemetry.go            # 实时遥测（内存，RPM/用量/成功率）
+│   ├── usage.go                # 用量异步批量记录（写 storage 后端）
+│   ├── redis.go                # Redis 缓存层（captcha/轮询指针/熔断）
+│   ├── storage_init.go         # 存储后端选择 + 脱敏日志
+│   ├── logger.go               # 彩色 slog 日志
+│   ├── admin.go                # /admin 后台 API（概览/token/key/模型/用量）
+│   ├── admin_static.go         # /admin 静态资源
+│   ├── admin_ui.html           # 管理后台单页应用
+│   └── storage/                # 持久化后端抽象
+│       ├── storage.go          # Backend 接口 + 记录类型
+│       ├── init.go             # 按 DATABASE_URL 选 File/Mysql 后端
+│       ├── file.go             # FileBackend（data/ 文件）
+│       ├── mysql.go            # MysqlBackend（MySQL，自动建表）
+│       └── mysql_test.go       # MySQL 集成测试（ZAI_TEST_MYSQL_DSN）
+├── captcha-provider/           # 验证码 provider（独立 Node 服务）
+│   ├── server.js               # HTTP 服务：/v1/chat(全代理) /token /health
+│   ├── chat_proxy.cjs          # 核心：JSDOM 全链路代理（captcha+建会话+completions+流式）
+│   ├── solver.cjs              # 老路径：JSDOM 取 captcha token（/token 用）
+│   ├── test.cjs                # 求解器测试
+│   └── package.json            # 依赖（jsdom）
+├── deploy/                     # systemd 部署示例
+│   ├── zai2api.service
+│   └── zai-captcha-provider.service
+├── data/                       # 文件持久化（.gitignore）
+│   ├── tokens.txt              # Z.AI token
+│   ├── api_keys.json           # 客户端 API Key
+│   └── usage.jsonl             # 用量日志（文件后端）
+├── Dockerfile
+├── go.mod / go.sum
+└── .env.example                # 配置示例
+```
+
 ## ⚠️ 已知缺陷与限制
 
 **欢迎 PR 来修这些问题：**
