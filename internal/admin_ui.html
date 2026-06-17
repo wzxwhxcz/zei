@@ -767,7 +767,10 @@ table.tbl tbody tr:last-child td { border-bottom: none; }
     <div class="modal-sub">把 Z.AI 浏览器里 localStorage 的 token 值粘贴在下面。可以一次粘贴多个，用换行分隔。</div>
     <div class="form-row">
       <label>JWT Token（每行一个）</label>
-      <textarea id="newTokenInput" placeholder="eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9..." style="min-height: 130px; font-family: 'JetBrains Mono', monospace; font-size: 12px;"></textarea>
+      <textarea id="newTokenInput" placeholder="支持以下格式（每行一个）：
+eyJhbGciOiJFUzI1NiIs...
+email----password----eyJhbGciOiJFUzI1NiIs...
+token=eyJhbGciOiJFUzI1NiIs..." style="min-height: 130px; font-family: 'JetBrains Mono', monospace; font-size: 12px;"></textarea>
     </div>
     <div id="addTokenErr" style="color: var(--red); font-size: 13px; min-height: 18px;"></div>
     <div class="modal-actions">

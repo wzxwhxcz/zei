@@ -9,13 +9,37 @@ import (
 
 // AddToken 添加一个 token 到 TokenManager 并写入 data/tokens.txt
 // 写入文件后 fsnotify 会触发 reload，但我们这里同步更新内存以避免短暂窗口
-func (tm *TokenManager) AddToken(token string) (*TokenInfo, error) {
-	token = strings.TrimSpace(token)
+// extractTokenFromInput 从用户输入中提取 JWT token，兼容多种格式：
+//   - 裸 JWT：eyJhbGci...
+//   - token=eyJ... 前缀
+//   - email----password----token（---- 分隔，token 在最后）
+//   - 任意以 ---- 分隔的多段，取最后一段（只要它是合法 JWT）
+func extractTokenFromInput(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	// token= 前缀
+	if strings.HasPrefix(input, "token=") {
+		input = strings.TrimPrefix(input, "token=")
+	}
+	// ---- 分隔的多段（如 email----password----token），取最后一段
+	if strings.Contains(input, "----") {
+		parts := strings.Split(input, "----")
+		last := strings.TrimSpace(parts[len(parts)-1])
+		// 校验最后一段是 JWT（以 eyJ 开头）
+		if strings.HasPrefix(last, "eyJ") {
+			return last
+		}
+	}
+	// 裸 JWT
+	return strings.TrimSpace(input)
+}
+
+func (tm *TokenManager) AddToken(tokenInput string) (*TokenInfo, error) {
+	token := extractTokenFromInput(tokenInput)
 	if token == "" {
 		return nil, fmt.Errorf("token 为空")
-	}
-	if strings.HasPrefix(token, "token=") {
-		token = strings.TrimPrefix(token, "token=")
 	}
 
 	// JWT 校验
