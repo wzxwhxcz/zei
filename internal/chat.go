@@ -599,6 +599,18 @@ type UpstreamResult struct {
 
 const RetryableErr = "INTERNAL_ERROR"
 
+// isTransientError 判断错误是否为「瞬时/容量」类（重试 + 退避可能恢复）。
+// MODEL_CONCURRENCY_LIMIT（模型容量满）、INTERNAL_ERROR（上游内部错误）属于此类。
+// 这类错误换 token 无意义，但等一会再试可能恢复，所以重试时应加退避延迟。
+func isTransientError(msg string) bool {
+	m := strings.ToUpper(msg)
+	return strings.Contains(m, "CONCURRENCY") ||
+		strings.Contains(m, "CAPACITY") ||
+		strings.Contains(m, "INTERNAL_ERROR") ||
+		strings.Contains(m, "OVERLOAD") ||
+		strings.Contains(m, "RATE_LIMIT")
+}
+
 func (u *UpstreamData) GetEditContent() string {
 	editContent := u.Data.EditContent
 	if editContent == "" {
@@ -845,8 +857,9 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			resp.Body.Close()
 			LogError("Upstream error (attempt %d): status=%d, body=%s", attempt+1, resp.StatusCode, string(body)[:min(500, len(body))])
 			lastError = fmt.Sprintf("status %d", resp.StatusCode)
-			// 非 5xx 错误不重试
-			if resp.StatusCode < 500 {
+			// 429 限流也属于瞬时错误，允许重试（5xx 本来就重试）
+			isRetryableStatus := resp.StatusCode >= 500 || resp.StatusCode == 429
+			if !isRetryableStatus {
 				GetTokenManager().RecordCall(false, isMultimodal)
 				RecordUsageFull(storageUsageRecord{
 					ApiKey: apiKey, Model: req.Model, InputTok: inputTokens,
@@ -855,6 +868,15 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				})
 				writeUpstreamError(w, resp.StatusCode, body)
 				return
+			}
+			// 5xx/429 退避后重试
+			if attempt < maxRetries {
+				backoff := time.Duration(attempt+1) * 1500 * time.Millisecond
+				if backoff > 6*time.Second {
+					backoff = 6 * time.Second
+				}
+				LogInfo("Status %d, backing off %v before retry %d/%d", resp.StatusCode, backoff, attempt+2, maxRetries+1)
+				time.Sleep(backoff)
 			}
 			continue
 		}
@@ -887,6 +909,16 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if req.Stream && result.ResponseStarted {
 			LogDebug("Stream response already started, cannot retry")
 			break
+		}
+
+		// 瞬时错误（模型容量满/内部错误/限流）退避重试：等一会再试可能恢复
+		if isTransientError(lastError) && attempt < maxRetries {
+			backoff := time.Duration(attempt+1) * 1500 * time.Millisecond // 1.5s, 3s, 4.5s...
+			if backoff > 6*time.Second {
+				backoff = 6 * time.Second
+			}
+			LogInfo("Transient error, backing off %v before retry %d/%d", backoff, attempt+2, maxRetries+1)
+			time.Sleep(backoff)
 		}
 	}
 
