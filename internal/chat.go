@@ -280,16 +280,18 @@ func makeFullProxyRequest(token, upstreamModel string, enableThinking, autoWebSe
 		return nil, err
 	}
 
-	req, err := fhttp.NewRequest("POST", proxyURL, bytes.NewReader(payloadBytes))
+	req, err := http.NewRequest("POST", proxyURL, bytes.NewReader(payloadBytes))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// 关键：禁用 gzip。Go http.Client 默认发 Accept-Encoding: gzip，
+	// Node/上游若返回 gzip 响应，Go transport 会缓冲整个 body 解压 → 伪流式。
+	req.Header.Set("Accept-Encoding", "identity")
 
-	client, err := TLSHTTPClient(300 * time.Second)
-	if err != nil {
-		return nil, err
-	}
+	// provider 是 localhost 内部通信，不用 TLSHTTPClient（tls-client 会缓冲流式数据，
+	// 导致 SSE 攒批成"伪流式"）。改用标准 http.Client，实时读流。
+	client := &http.Client{Timeout: 300 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -307,7 +309,7 @@ func makeFullProxyRequest(token, upstreamModel string, enableThinking, autoWebSe
 	}
 
 	// 透传：provider 的 body 就是上游 SSE 原文，直接交给下游解析。
-	// 用 fhttp.Response 包一层，Content-Type 设成 text/event-stream。
+	// 用 fhttp.Response 包一层（下游 handleStream 用标准 io.Reader 读），Content-Type 设成 text/event-stream。
 	out := &fhttp.Response{
 		StatusCode: resp.StatusCode,
 		Status:     resp.Status,

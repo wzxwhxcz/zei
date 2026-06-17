@@ -236,7 +236,7 @@ function xhrSendStream(window, method, url, headers, body, { onChunk, onHeaders,
 //   callbacks.onChunk(sseString)          — 上游 SSE 增量，实时 pipe
 // 返回 { status, headers, full }（onload 时，full 为完整拼接）
 async function handleChat(req, callbacks = {}) {
-  const { token, upstream_model, enable_thinking, auto_web_search, reasoning_effort, signature_prompt, messages, files } = req;
+  const { token, upstream_model, enable_thinking, auto_web_search, reasoning_effort, signature_prompt, messages, files, extra_body } = req;
   if (!token) throw new Error('missing token');
   if (!upstream_model) throw new Error('missing upstream_model');
 
@@ -329,6 +329,10 @@ async function handleChat(req, callbacks = {}) {
       background_tasks: { title_generation: true, tags_generation: true },
       captcha_verify_param: captchaParam,
     };
+    // extra_body：透传额外的 body 字段（如原生 tools/tool_choice 实验用），覆盖同名默认字段
+    if (extra_body && typeof extra_body === 'object') {
+      Object.assign(body, extra_body);
+    }
     if (files && files.length > 0) {
       body.files = files;
       body.current_user_message_id = userMsgId;

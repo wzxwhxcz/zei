@@ -182,6 +182,10 @@ const server = http.createServer(async (req, res) => {
             'Connection': 'keep-alive',
             'X-Accel-Buffering': 'no',
           });
+          // 禁用 Nagle 算法：让每个 chunk 立即发送，不被 TCP 攒批（伪流式根因）
+          if (res.socket && typeof res.socket.setNoDelay === 'function') {
+            res.socket.setNoDelay(true);
+          }
         },
         // 上游 SSE 增量：实时 pipe 给客户端
         onChunk: (chunk) => {
