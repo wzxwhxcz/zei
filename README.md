@@ -228,9 +228,10 @@ CMD ["./start.sh"]
 ```
 
 ### HF Spaces 注意事项
-- **端口**：必须 7860（否则一直 Starting）
-- **绑定地址**：`HOST=0.0.0.0`（HF 需要从外部访问，127.0.0.1 不行）
-- **出站端口限制**：HF Spaces 只允许出站到 80/443/8080。captcha-provider 调阿里云验证码（https，443）没问题；但**内部的 9876 端口是容器内通信**，不受这个限制。
+- **端口**：Go proxy 必须 7860（HF 健康检查打这里，否则一直 Starting）
+- **⚠️ 端口冲突**：`PORT` 环境变量**只给 Go proxy**。captcha-provider 用独立的 `PROVIDER_PORT`（默认 9876，内部通信），**不要让 provider 读到 `PORT=7860`**，否则两个进程抢 7860 → `bind: address already in use`。代码已做隔离（provider 只读 `PROVIDER_PORT`/`PROVIDER_HOST`，不读全局 `PORT`/`HOST`），所以 `ENV PORT=7860` 安全。
+- **绑定地址**：Go proxy 需要 `HOST=0.0.0.0`（HF 从外部访问）。provider 内部用 `127.0.0.1` 即可（代码默认，无需设）。
+- **出站端口限制**：HF Spaces 只允许出站到 80/443/8080。captcha-provider 调阿里云验证码（https，443）✅；内部 9876 是容器内通信，不受限。
 - **持久化**：HF Spaces 容器是临时的，重启丢数据。**务必配 `DATABASE_URL`（TiDB/PlanetScale 等云 MySQL）**，否则 token/api key 重启就没了。
 - **Secrets**：敏感信息（token、DB 密码）用 Space 的 Repository secrets，别写进 Dockerfile。
 

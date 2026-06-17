@@ -12,8 +12,11 @@ const require = createRequire(import.meta.url);
 const chatProxy = require('./chat_proxy.cjs');
 
 // ─── Config ───
-const PORT = Number(process.env.PORT || 9876);
-const HOST = process.env.HOST || '127.0.0.1';
+// 用独立的 PROVIDER_PORT/PROVIDER_HOST，绝不读全局 PORT/HOST
+// （HF Spaces 设 PORT=7860 给 Go proxy，provider 用 9876 内部通信即可，
+//  否则两个进程抢同一个端口 → "bind: address already in use"）。
+const PORT = Number(process.env.PROVIDER_PORT || 9876);
+const HOST = process.env.PROVIDER_HOST || '127.0.0.1';
 const SECRET = process.env.SECRET || '';
 // 老路径 /token 用的 scene（solver.cjs 的 popup/traceless 模式）。
 // 注意：36qgs6xb（前端 embed 主配置）在 JSDOM 里跑不通（network error），
