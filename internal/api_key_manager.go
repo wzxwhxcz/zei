@@ -56,8 +56,26 @@ func (m *ApiKeyManager) path() string {
 	return filepath.Join(m.dataDir, m.filename)
 }
 
-// load 从磁盘读
+// load 从存储后端读（文件或 MySQL）。后端不可用回退到直接读 data/api_keys.json。
 func (m *ApiKeyManager) load() error {
+	if b := storageBackend(); b != nil {
+		records, err := b.ListApiKeys()
+		if err == nil {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			for _, r := range records {
+				if r.Key != "" {
+					m.keys[r.Key] = &ApiKey{
+						Key: r.Key, Name: r.Name, CreatedAt: r.CreatedAt,
+						LastUsed: r.LastUsed, UseCount: r.UseCount, Enabled: r.Enabled,
+					}
+				}
+			}
+			LogInfo("ApiKeyManager 已加载 %d 个 API Key（来自存储后端）", len(m.keys))
+			return nil
+		}
+	}
+	// 回退：直接读文件
 	if err := os.MkdirAll(m.dataDir, 0755); err != nil {
 		return err
 	}
@@ -83,17 +101,47 @@ func (m *ApiKeyManager) load() error {
 	return nil
 }
 
-// save 写到磁盘（原子）
+// save 持久化（存储后端优先，回退直接写文件）。
 func (m *ApiKeyManager) save() error {
 	m.mu.RLock()
-	arr := make([]*ApiKey, 0, len(m.keys))
+	records := make([]storageApiKeyRecord, 0, len(m.keys))
 	for _, k := range m.keys {
-		copy := *k
-		arr = append(arr, &copy)
+		records = append(records, storageApiKeyRecord{
+			Key: k.Key, Name: k.Name, CreatedAt: k.CreatedAt,
+			LastUsed: k.LastUsed, UseCount: k.UseCount, Enabled: k.Enabled,
+		})
 	}
 	m.mu.RUnlock()
-	sort.Slice(arr, func(i, j int) bool { return arr[i].CreatedAt < arr[j].CreatedAt })
 
+	b := storageBackend()
+	if b != nil {
+		// FileBackend 支持 RewriteApiKeys（全量覆盖）；MySQL 逐条 upsert。
+		if fb, ok := b.(interface{ RewriteApiKeys([]storageApiKeyRecord) error }); ok {
+			return fb.RewriteApiKeys(records)
+		}
+		var firstErr error
+		for _, r := range records {
+			if err := b.UpsertApiKey(r); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+
+	// 回退：直接写文件
+	return m.saveRaw(records)
+}
+
+// saveRaw 直接写 data/api_keys.json（后端不可用时的兜底）。
+func (m *ApiKeyManager) saveRaw(records []storageApiKeyRecord) error {
+	sort.Slice(records, func(i, j int) bool { return records[i].CreatedAt < records[j].CreatedAt })
+	arr := make([]*ApiKey, 0, len(records))
+	for _, r := range records {
+		arr = append(arr, &ApiKey{
+			Key: r.Key, Name: r.Name, CreatedAt: r.CreatedAt,
+			LastUsed: r.LastUsed, UseCount: r.UseCount, Enabled: r.Enabled,
+		})
+	}
 	data, err := json.MarshalIndent(arr, "", "  ")
 	if err != nil {
 		return err

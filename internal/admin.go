@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -169,7 +170,62 @@ func HandleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		},
 		"captcha":     captchaStatus,
 		"model_stats": modelStats,
+		"storage_backend": map[string]interface{}{
+			"type":    storageBackendType(),
+			"redis":   Cfg.RedisURL != "",
+		},
 	})
+}
+
+// storageBackendType 返回当前存储后端类型（供 overview 展示）。
+func storageBackendType() string {
+	if Cfg.DatabaseURL != "" {
+		return "mysql"
+	}
+	return "file"
+}
+
+// HandleAdminUsage GET /admin/api/usage?from=&to=&days=
+// 返回历史用量汇总（来自存储后端 usage_logs / usage.jsonl）。
+func HandleAdminUsage(w http.ResponseWriter, r *http.Request) {
+	if !adminAuth(r) {
+		adminWriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if r.Method != http.MethodGet {
+		adminWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	to := time.Now()
+	from := to.AddDate(0, 0, -7) // 默认最近 7 天
+	if d := r.URL.Query().Get("days"); d != "" {
+		if n, err := strconv.Atoi(d); err == nil && n > 0 && n < 366 {
+			from = to.AddDate(0, 0, -n)
+		}
+	}
+	if f := r.URL.Query().Get("from"); f != "" {
+		if t, err := time.Parse(time.RFC3339, f); err == nil {
+			from = t
+		}
+	}
+	if t := r.URL.Query().Get("to"); t != "" {
+		if tt, err := time.Parse(time.RFC3339, t); err == nil {
+			to = tt
+		}
+	}
+
+	b := storageBackend()
+	if b == nil {
+		adminWriteJSON(w, http.StatusOK, map[string]interface{}{"error": "storage backend not initialized"})
+		return
+	}
+	summary, err := b.QueryUsageSummary(from, to)
+	if err != nil {
+		adminWriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	adminWriteJSON(w, http.StatusOK, summary)
 }
 
 // HandleAdminConfig GET /admin/api/config
@@ -387,7 +443,7 @@ func HandleAdminTestModel(w http.ResponseWriter, r *http.Request) {
 
 	messages := []Message{{Role: "user", Content: body.Prompt}}
 	startedAt := time.Now()
-	resp, modelName, err := makeUpstreamRequest(token, messages, body.Model, nil, nil, false, nil)
+	resp, modelName, err := makeUpstreamRequest(token, messages, body.Model, nil, nil, false, nil, "")
 	if err != nil {
 		adminWriteJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("upstream: %v", err)})
 		return

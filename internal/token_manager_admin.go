@@ -122,9 +122,46 @@ func (tm *TokenManager) rebuildValidTokensLocked() {
 	}
 }
 
-// writeTokensToFile 把当前所有 token 写入 data/tokens.txt
-// 临时文件 + rename 保证原子性
+// writeTokensToFile 把当前所有 token 持久化。
+// 优先走存储后端：FileBackend 全量重写 data/tokens.txt；MySQL 逐条 upsert。
+// 后端不可用时回退到直接写文件。
 func (tm *TokenManager) writeTokensToFile() error {
+	tm.mu.RLock()
+	records := make([]storageTokenRecord, 0, len(tm.tokens))
+	for tk, info := range tm.tokens {
+		records = append(records, storageTokenRecord{
+			Token:       tk,
+			Email:       info.Email,
+			UserID:      info.UserID,
+			Valid:       info.Valid,
+			UseCount:    info.UseCount,
+			LastChecked: info.LastChecked,
+		})
+	}
+	tm.mu.RUnlock()
+
+	b := storageBackend()
+	if b != nil {
+		// FileBackend 支持 RewriteTokens（全量覆盖，最高效）；
+		// 其他后端（MySQL）逐条 upsert。
+		if fb, ok := b.(interface{ RewriteTokens([]storageTokenRecord) error }); ok {
+			return fb.RewriteTokens(records)
+		}
+		var firstErr error
+		for _, r := range records {
+			if err := b.UpsertToken(r); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+
+	// 回退：直接写文件（后端未初始化，如早期调用）
+	return tm.writeTokensToFileRaw()
+}
+
+// writeTokensToFileRaw 直接写 data/tokens.txt（后端不可用时的兜底）。
+func (tm *TokenManager) writeTokensToFileRaw() error {
 	tm.mu.RLock()
 	tokens := make([]string, 0, len(tm.tokens))
 	for tk := range tm.tokens {

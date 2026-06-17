@@ -12,11 +12,15 @@
 - **🎨 内置管理后台 WebUI** — 在 `/admin` 路径访问，单页应用，无需独立部署
 - **🔐 API Key 管理** — 在后台创建、启用/禁用、删除自定义 API Key（持久化），客户端用这些 key 调用反代
 - **🔑 Z.AI Token 池** — 在后台增删 Z.AI JWT token，反代自动轮换使用
-- **🤖 自动验证码绕过** — 内置 Captcha Provider，自动获取阿里云 TRACELESS 验证码 token，无需人工干预
+- **🤖 自动验证码绕过** — 内置 Captcha Provider，纯 JSDOM 全链路代理（同环境拿 captcha + 建会话 + 发 completions），绕开跨进程环境不一致导致的 F019 verify_failed，无需 Chromium
 - **🔄 失败重试** — 可配置重试次数，自动换 token 重试
-- **🧠 56 个模型** — 支持 GLM-5.1、GLM-5、GLM-4.6、GLM-4.5 等全系列模型
-- **⚡ 流式/非流式** — 完整支持 SSE 流式输出
-- **🖼️ 多模态** — 支持图片和视频输入
+- **🧠 GLM-5.2 全系列模型** — 支持 GLM-5.2、GLM-5.1、GLM-5、GLM-4.7、GLM-4.6、GLM-4.5 等
+- **🧠 思考模式开关** — 支持 `reasoning_effort`（high/max），自动映射 z.ai 取值
+- **⚡ 流式/非流式** — 完整支持 SSE 流式输出（全代理路径 onprogress 增量切片，真流式）
+- **🖼️ 多模态** — 支持图片和视频输入（GLM-4.6-V 等视觉模型）
+- **🛠️ 工具调用** — function calling 走 prompt injection，适配 GLM-5.2 的 `<tool_injection><parameters>` 自创格式
+- **🗄️ 外接数据库** — 可选 MySQL（token/Key/用量持久化）+ Redis（captcha 缓存/轮询指针/熔断），不设则用文件 `data/`
+- **📊 用量统计** — 历史用量记录（按模型/按 key 汇总），`GET /admin/api/usage` 查询
 
 ## 🏗️ 架构
 
@@ -27,26 +31,36 @@
 ┌─────────────────────┐
 │   Go Proxy (:8000)  │  ← OpenAI 兼容 API
 │   多账号轮换 + 重试   │
+│   CAPTCHA_FULL_PROXY_URL → 全代理分支
 └────────┬────────────┘
-         │ 每次请求获取 captcha token
+         │ 整个 chat 请求转发
          ▼
 ┌─────────────────────────────┐
-│  Captcha Provider (:9876)   │  ← headless Chromium
-│  阿里云 TRACELESS 无感验证   │
-│  token 预取池 + 自动刷新     │
+│  Captcha Provider (:9876)   │  ← 纯 JSDOM（无 Chromium）
+│  /v1/chat 全链路代理：        │
+│  ① initAliyunCaptcha        │
+│  ② /api/v1/chats/new 建会话  │
+│  ③ /api/v2/chat/completions │
+│  ④ SSE 流式透传               │
+│  窗口池（WINDOW_POOL_SIZE）   │
 └────────┬────────────────────┘
          │
          ▼
 ┌─────────────────────┐
 │      chat.z.ai      │
 └─────────────────────┘
+
+可选持久化层（env 切换）：
+  DATABASE_URL → MySQL（token/Key/用量）
+  REDIS_URL    → Redis（captcha缓存/轮询指针/熔断）
+  都不设       → 文件 data/
 ```
 
 ## 🚀 快速开始
 
 ### 1. 启动 Captcha Provider
 
-需要 Node.js 18+ 和 Chromium：
+需要 Node.js 18+（纯 JSDOM，无需 Chromium）：
 
 ```bash
 cd captcha-provider
@@ -59,9 +73,13 @@ node server.js
 |------|--------|------|
 | `PORT` | 9876 | 监听端口 |
 | `HOST` | 127.0.0.1 | 监听地址 |
-| `CHROMIUM_PATH` | /usr/bin/chromium | Chromium 路径 |
-| `POOL_SIZE` | 5 | token 池大小 |
-| `TOKEN_TTL` | 240000 | token 有效期 (ms) |
+| `WINDOW_POOL_SIZE` | 2 | JSDOM 窗口池大小（=并发上限） |
+| `POOL_SIZE` | 5 | captcha token 预取池（老 `/token` 路径） |
+| `TOKEN_TTL` | 240000 | captcha token 有效期 (ms) |
+| `CAPTCHA_SCENE` | didk33e0 | 阿里云 SceneId |
+| `CAPTCHA_REGION` | sgp | 阿里云区域 |
+| `CAPTCHA_PREFIX` | no8xfe | 端点前缀 |
+| `FE_VERSION` | prod-fe-1.1.62 | 对齐前端版本 |
 
 ### 2. 启动 Go Proxy
 
@@ -71,8 +89,11 @@ docker run -d --network host \
   -e AUTH_TOKEN=your-api-key \
   -e BACKUP_TOKEN=your-zai-jwt-token \
   -e CAPTCHA_PROVIDER_URL=http://127.0.0.1:9876 \
+  -e CAPTCHA_FULL_PROXY_URL=http://127.0.0.1:9876 \
   zai2api
 ```
+
+> 💡 `CAPTCHA_FULL_PROXY_URL` 是推荐的全代理路径（整个请求在 JSDOM 同环境完成，绕开 F019）。不设则走老路径（Go 直连 + 取 captcha token）。
 
 ### 3. 使用
 
@@ -81,9 +102,24 @@ curl http://localhost:8000/v1/chat/completions \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "GLM-5.1",
-    "messages": [{"role": "user", "content": "你好"}],
-    "stream": true
+    "model": "GLM-5.2",
+    "stream": true,
+    "reasoning_effort": "high",
+    "messages": [{"role": "user", "content": "你好"}]
+  }'
+```
+
+工具调用：
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "GLM-5.2",
+    "tool_choice": "required",
+    "tools": [{"type":"function","function":{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}}],
+    "messages": [{"role": "user", "content": "Tokyo weather?"}]
   }'
 ```
 
@@ -92,11 +128,12 @@ curl http://localhost:8000/v1/chat/completions \
 浏览器访问 `http://localhost:8000/admin`，输入 `AUTH_TOKEN` 登录（也可以用后台创建的任意 API Key 登录）。
 
 后台功能：
-- **📊 概览**：实时请求量、Token 消耗、Captcha Provider 状态、Top 5 调用模型
-- **🔐 API Key**：创建、启用/禁用、删除自定义 API Key。这些 key 用于客户端访问反代，也可以登录后台。持久化到 `data/api_keys.json`
-- **🔑 Z.AI Token**：动态增删 Z.AI JWT token（从浏览器复制），支持批量粘贴。持久化到 `data/tokens.txt`
-- **🧠 模型**：56 个模型的映射关系，可搜索过滤
+- **📊 概览**：实时请求量、Token 消耗、Captcha Provider 状态、Top 5 调用模型、存储后端类型（file/mysql）
+- **🔐 API Key**：创建、启用/禁用、删除自定义 API Key。这些 key 用于客户端访问反代，也可以登录后台。持久化到 `data/api_keys.json` 或 MySQL
+- **🔑 Z.AI Token**：动态增删 Z.AI JWT token（从浏览器复制），支持批量粘贴。持久化到 `data/tokens.txt` 或 MySQL
+- **🧠 模型**：全系列模型映射关系，可搜索过滤
 - **🎮 Playground**：直接在后台测试任意模型
+- **📊 用量统计**：`GET /admin/api/usage?days=N` 查询历史用量（按模型/按 key 汇总）
 - **⚙️ 配置**：当前生效的环境变量（敏感信息脱敏）
 - **💖 关于**：项目故事和已知缺陷
 
@@ -115,7 +152,10 @@ curl http://localhost:8000/v1/chat/completions \
 | `PORT` | 8000 | API 监听端口 |
 | `AUTH_TOKEN` | (必填) | API 认证密钥，逗号分隔支持多个 |
 | `BACKUP_TOKEN` | (推荐) | Z.AI JWT token，逗号分隔支持多个 |
-| `CAPTCHA_PROVIDER_URL` | (推荐) | Captcha Provider 地址 |
+| `CAPTCHA_PROVIDER_URL` | (推荐) | Captcha Provider 地址（老路径：取 token） |
+| `CAPTCHA_FULL_PROXY_URL` | (推荐) | JSDOM 全链路 chat 代理地址（推荐，绕开 F019） |
+| `DATABASE_URL` | (可选) | MySQL DSN，设了用 MySQL 存 token/Key/用量；不设用文件 |
+| `REDIS_URL` | (可选) | Redis 缓存（captcha/token 轮询/熔断） |
 | `RETRY_COUNT` | 5 | 失败重试次数 |
 | `FORCE_TOOL_CHOICE_REQUIRED` | false | 强制把 `auto`/未指定的 `tool_choice` 升级为 `required`，提升 GLM 模型工具调用的触发率（详见已知缺陷） |
 | `SKIP_AUTH_TOKEN` | false | 跳过 API Key 验证 |
@@ -133,14 +173,21 @@ curl http://localhost:8000/v1/chat/completions \
 
 Z.AI 在 2026 年 5 月上线了阿里云滑动验证码（AliyunCaptcha），所有 API 请求必须携带 `captcha_verify_param`。
 
-本项目的解决方案：
-- 启动一个 headless Chromium 进程
-- 加载 chat.z.ai 页面，获取阿里云验证码 SDK
-- 利用 TRACELESS（无感验证）模式自动获取 token
-- 预取 token 池，确保请求时立即可用
-- 整个过程无需人工干预，无需 GUI
+本项目的解决方案（**纯 JSDOM 全链路代理，无需 Chromium**）：
 
-资源占用约 500MB 内存（Chromium 进程），CPU 几乎为零。
+> 关键发现：阿里云风控会校验「获取 captcha 的环境」与「发 chat 请求的环境」是否一致。跨进程（Go 取请求 + Node 给 token）会因指纹不一致被拒（F019 verify_failed）。
+
+- 启动常驻 JSDOM 窗口池（`WINDOW_POOL_SIZE`）
+- 在**同一个 JSDOM window** 内完成全链路：
+  1. `initAliyunCaptcha`（embed traceless 模式拿 `captcha_verify_param`）
+  2. `POST /api/v1/chats/new` 创建会话拿真实 chatId
+  3. `POST /api/v2/chat/completions` 发请求（带变量 `variables` / `background_tasks` 等完整字段）
+  4. SSE onprogress 增量切片，实时流式透传回 Go proxy
+- 请求用完丢弃 window，后台补新窗口（规避同 window 重复 initAliyunCaptcha 兼容性）
+
+资源占用约 100-200MB 内存（JSDOM，远低于 Chromium 的 500MB-1GB），无 GUI、无浏览器依赖。
+
+设了 `REDIS_URL` 时，captcha token 还会被 Redis 缓存（多实例共享）。
 
 ## ⚠️ 已知缺陷与限制
 

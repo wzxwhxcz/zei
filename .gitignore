@@ -3,3 +3,6 @@ browser-profile/
 .env
 data/
 *.log
+# 编译产物
+*.exe
+*.exe~

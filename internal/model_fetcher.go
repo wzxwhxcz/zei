@@ -87,6 +87,8 @@ func initBuiltinMappings() {
 	registerBuiltinModel("GLM-5-Turbo", "GLM-5-Turbo", "GLM-5-Turbo", true, false, true, []string{"advanced-search"})
 	registerBuiltinModel("GLM-5v-Turbo", "GLM-5v-Turbo", "GLM-5v-Turbo", true, false, true, []string{"advanced-search", "vlm-image-search", "vlm-image-recognition", "vlm-image-processing"})
 	registerBuiltinModel("GLM-5.1", "GLM-5.1", "GLM-5.1", true, false, true, []string{"advanced-search"})
+	// GLM-5.2：思考模型，上游 id glm-5.2，支持 features.reasoning_effort (low/medium/high/max)
+	registerBuiltinModel("GLM-5.2", "glm-5.2", "GLM-5.2", true, false, true, []string{"advanced-search"})
 	registerBuiltinModel("glm-4-flash", "glm-4-flash", "glm-4-flash", true, false, true, []string{"advanced-search"})
 	registerBuiltinModel("glm-4-air-250414", "glm-4-air-250414", "glm-4-air-250414", true, false, true, []string{"advanced-search"})
 	registerBuiltinModel("GLM-4.1V-Thinking-FlashX", "GLM-4.1V-Thinking-FlashX", "GLM-4.1V-Thinking-FlashX", true, false, true, []string{"advanced-search", "vlm-image-search", "vlm-image-recognition", "vlm-image-processing"})

@@ -15,12 +15,21 @@ type captchaProviderResponse struct {
 	Error string `json:"error"`
 }
 
-// fetchCaptchaToken 从 captcha provider 服务获取验证码 token
+// fetchCaptchaToken 从 captcha provider 服务获取验证码 token。
+// 优先查 Redis 缓存（多实例共享）；未命中再调 provider，并回填 Redis。
 func fetchCaptchaToken() (string, error) {
 	if Cfg.CaptchaProviderURL == "" {
 		return "", nil
 	}
 
+	scene := "didk33e0" // 与 captcha-provider 一致
+	// 1) Redis 缓存命中
+	if cached := RedisGetCaptcha(scene); cached != "" {
+		LogDebug("[captcha] Redis 缓存命中")
+		return cached, nil
+	}
+
+	// 2) 调 provider
 	url := strings.TrimRight(Cfg.CaptchaProviderURL, "/") + "/token"
 
 	client := &http.Client{Timeout: 35 * time.Second}
@@ -48,5 +57,7 @@ func fetchCaptchaToken() (string, error) {
 		return "", fmt.Errorf("captcha provider error: %s", result.Error)
 	}
 
+	// 3) 回填 Redis
+	RedisSetCaptcha(scene, result.Token)
 	return result.Token, nil
 }

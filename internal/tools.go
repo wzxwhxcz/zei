@@ -40,6 +40,9 @@ var (
 	xmlToolCallItemPattern     = regexp.MustCompile(`(?is)<tool_call(?:\s+id="([^"]+)")?>(.*?)</tool_call>`)
 	xmlToolNamePattern         = regexp.MustCompile(`(?is)<name>\s*([^<]+?)\s*</name>`)
 	xmlToolArgumentsPattern    = regexp.MustCompile(`(?is)<arguments>\s*(.*?)\s*</arguments>`)
+	// GLM-5.2 自创格式：每个参数用 <parameter name="x">value</parameter> 表示
+	glmToolParamPattern        = regexp.MustCompile(`(?is)<parameter(?:\s+name="([^"]+)")?>(.*?)</parameter>`)
+	glmToolParametersPattern   = regexp.MustCompile(`(?is)<parameters>\s*(.*?)\s*</parameters>`)
 	xmlToolArgumentsCDataStart = "<![CDATA["
 	xmlToolArgumentsCDataEnd   = "]]>"
 	callIDCounter              int64
@@ -472,6 +475,52 @@ func trimXMLArgumentsPayload(payload string) string {
 	return strings.TrimSpace(html.UnescapeString(payload))
 }
 
+// extractGLMStyleArguments 解析 GLM-5.2 自创的 <parameters><parameter name="x">val</parameter></parameters> 格式，
+// 把每个 <parameter name="x">value</parameter> 收集成 {"x":"value"} JSON。
+// 返回空串表示没有 <parameters> 块；返回 "{}" 表示空参数。
+func extractGLMStyleArguments(itemPayload string) string {
+	paramsBlock := glmToolParametersPattern.FindStringSubmatch(itemPayload)
+	if len(paramsBlock) < 2 {
+		return ""
+	}
+	paramMatches := glmToolParamPattern.FindAllStringSubmatch(paramsBlock[1], -1)
+	if len(paramMatches) == 0 {
+		return "{}"
+	}
+	obj := make(map[string]string, len(paramMatches))
+	for _, pm := range paramMatches {
+		if len(pm) < 3 {
+			continue
+		}
+		name := strings.TrimSpace(pm[1])
+		val := strings.TrimSpace(html.UnescapeString(pm[2]))
+		if name == "" {
+			continue
+		}
+		obj[name] = val
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// extractItemArguments 从一个 <tool_call> 的内部 payload 取 arguments：
+// 优先标准 <arguments><![CDATA[...]]></arguments>，没有就回退到 GLM-5.2 的 <parameters><parameter>。
+func extractItemArguments(itemPayload string) string {
+	if argsMatch := xmlToolArgumentsPattern.FindStringSubmatch(itemPayload); len(argsMatch) >= 2 {
+		args := trimXMLArgumentsPayload(argsMatch[1])
+		if args != "" {
+			return args
+		}
+	}
+	if glmArgs := extractGLMStyleArguments(itemPayload); glmArgs != "" {
+		return glmArgs
+	}
+	return "{}"
+}
+
 func parseXMLToolCalls(text string) []ToolCall {
 	blocks := xmlToolCallBlockPattern.FindAllStringSubmatch(text, -1)
 	for _, block := range blocks {
@@ -492,19 +541,12 @@ func parseXMLToolCalls(text string) []ToolCall {
 			if len(nameMatch) < 2 {
 				continue
 			}
-			args := "{}"
-			if argsMatch := xmlToolArgumentsPattern.FindStringSubmatch(item[2]); len(argsMatch) >= 2 {
-				args = trimXMLArgumentsPayload(argsMatch[1])
-				if args == "" {
-					args = "{}"
-				}
-			}
 			calls = append(calls, ToolCall{
 				ID:   strings.TrimSpace(item[1]),
 				Type: "function",
 				Function: ToolCallFunction{
 					Name:      strings.TrimSpace(html.UnescapeString(nameMatch[1])),
-					Arguments: args,
+					Arguments: extractItemArguments(item[2]),
 				},
 			})
 		}
@@ -533,19 +575,12 @@ func parseXMLToolCalls(text string) []ToolCall {
 		if len(nameMatch) < 2 {
 			continue
 		}
-		args := "{}"
-		if argsMatch := xmlToolArgumentsPattern.FindStringSubmatch(payload); len(argsMatch) >= 2 {
-			args = trimXMLArgumentsPayload(argsMatch[1])
-			if args == "" {
-				args = "{}"
-			}
-		}
 		calls = append(calls, ToolCall{
 			ID:   strings.TrimSpace(item[1]),
 			Type: "function",
 			Function: ToolCallFunction{
 				Name:      strings.TrimSpace(html.UnescapeString(nameMatch[1])),
-				Arguments: args,
+				Arguments: extractItemArguments(payload),
 			},
 		})
 	}
@@ -591,7 +626,7 @@ func ExtractToolInvocations(text string) []ToolCall {
 	}
 
 	scanText := text
-	if len(scanText) > Cfg.ScanLimit {
+	if Cfg != nil && len(scanText) > Cfg.ScanLimit {
 		scanText = scanText[:Cfg.ScanLimit]
 	}
 

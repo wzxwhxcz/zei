@@ -252,7 +252,77 @@ func makeBridgeRequest(upstreamURL, token, signature string, bodyBytes []byte, r
 	return resp, nil
 }
 
-func makeUpstreamRequest(token string, messages []Message, model string, imageURLs, videoURLs []string, hasTools bool, tools []Tool) (*fhttp.Response, string, error) {
+// makeFullProxyRequest 把整个 chat 请求转给「JSDOM 全链路 chat 代理」provider。
+// provider 在同一个 JSDOM window 内完成：拿 captcha → 建 chats/new 会话 → 发 completions，
+// 并把上游 SSE 原文透传回来。Go 侧零改动复用现有 SSE 解析（handleStream/NonStream）。
+//
+// 入参：已映射的上游 model id + thinking/search 标志 + signature_prompt + upstreamMessages（含 fileID）+ filesData。
+// 返回：包成 *fhttp.Response 的 SSE 流（StatusCode 上游原值，通常 200）。
+func makeFullProxyRequest(token, upstreamModel string, enableThinking, autoWebSearch bool, reasoningEffort, signaturePrompt string, upstreamMessages []map[string]interface{}, filesData []map[string]interface{}) (*fhttp.Response, error) {
+	proxyURL := strings.TrimRight(Cfg.CaptchaFullProxyURL, "/") + "/v1/chat"
+
+	payload := map[string]interface{}{
+		"token":            token,
+		"upstream_model":   upstreamModel,
+		"enable_thinking":  enableThinking,
+		"auto_web_search":  autoWebSearch,
+		"signature_prompt": signaturePrompt,
+		"messages":         upstreamMessages,
+	}
+	if reasoningEffort != "" {
+		payload["reasoning_effort"] = reasoningEffort
+	}
+	if len(filesData) > 0 {
+		payload["files"] = filesData
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := fhttp.NewRequest("POST", proxyURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client, err := TLSHTTPClient(300 * time.Second)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// provider 出错（非 2xx）：读出来报错；成功：透传 body 给 SSE 解析。
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		preview := string(body)
+		if len(preview) > 500 {
+			preview = preview[:500]
+		}
+		return nil, fmt.Errorf("full-proxy /v1/chat status %d: %s", resp.StatusCode, preview)
+	}
+
+	// 透传：provider 的 body 就是上游 SSE 原文，直接交给下游解析。
+	// 用 fhttp.Response 包一层，Content-Type 设成 text/event-stream。
+	out := &fhttp.Response{
+		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
+		Header:     fhttp.Header{},
+		Body:       resp.Body,
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "text/event-stream; charset=utf-8"
+	}
+	out.Header.Set("Content-Type", ct)
+	return out, nil
+}
+
+func makeUpstreamRequest(token string, messages []Message, model string, imageURLs, videoURLs []string, hasTools bool, tools []Tool, reasoningEffort string) (*fhttp.Response, string, error) {
 	payload, err := DecodeJWTPayload(token)
 	if err != nil || payload == nil {
 		return nil, "", fmt.Errorf("invalid token")
@@ -366,6 +436,18 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	var upstreamMessages []map[string]interface{}
 	for _, msg := range messages {
 		upstreamMessages = append(upstreamMessages, msg.ToUpstreamMessage(urlToFileID))
+	}
+
+	// ── 全链路 chat 代理：整个请求转给 captcha-provider（同 JSDOM 环境拿 captcha+建会话+发 completions）──
+	// 设了 CaptchaFullProxyURL 就走这条，彻底绕开跨进程环境不一致导致的 F019 verify_failed。
+	// provider 返回上游 SSE 原文，下游 handleStream/NonStream 零改动复用。
+	if Cfg.CaptchaFullProxyURL != "" {
+		LogDebug("[FullProxy] routing %s via %s", targetModel, Cfg.CaptchaFullProxyURL)
+		resp, fpErr := makeFullProxyRequest(token, targetModel, enableThinking, autoWebSearch, reasoningEffort, latestUserContent, upstreamMessages, filesData)
+		if fpErr != nil {
+			return nil, targetModel, fpErr
+		}
+		return resp, targetModel, nil
 	}
 
 	// 普通 chat 模式（不使用 z.ai 内部 agent）。
@@ -727,6 +809,7 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	completionID := fmt.Sprintf("chatcmpl-%s", uuid.New().String()[:29])
 	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
+	reqStartedAt := time.Now()
 
 	var outputTokens int64
 	var lastError string
@@ -748,7 +831,7 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		resp, modelName, err := makeUpstreamRequest(token, messages, req.Model, reqImageURLs, reqVideoURLs, len(req.Tools) > 0, req.Tools)
+		resp, modelName, err := makeUpstreamRequest(token, messages, req.Model, reqImageURLs, reqVideoURLs, len(req.Tools) > 0, req.Tools, req.ReasoningEffort)
 		if err != nil {
 			LogError("Upstream request failed (attempt %d): %v", attempt+1, err)
 			lastError = err.Error()
@@ -763,6 +846,11 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 非 5xx 错误不重试
 			if resp.StatusCode < 500 {
 				GetTokenManager().RecordCall(false, isMultimodal)
+				RecordUsageFull(storageUsageRecord{
+					ApiKey: apiKey, Model: req.Model, InputTok: inputTokens,
+					OutputTok: 0, Success: false, IsMultimodal: isMultimodal,
+					LatencyMs: int(time.Since(reqStartedAt).Milliseconds()),
+				})
 				writeUpstreamError(w, resp.StatusCode, body)
 				return
 			}
@@ -803,6 +891,11 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !success && !req.Stream {
 		// 非流式请求失败，返回错误
 		GetTokenManager().RecordCall(false, isMultimodal)
+		RecordUsageFull(storageUsageRecord{
+			ApiKey: apiKey, Model: req.Model, InputTok: inputTokens,
+			OutputTok: outputTokens, Success: false, IsMultimodal: isMultimodal,
+			LatencyMs: int(time.Since(reqStartedAt).Milliseconds()),
+		})
 		writeError(w, http.StatusBadGateway, ErrTypeUpstream, fmt.Sprintf("请求失败: %s", lastError), "upstream_error")
 		return
 	}
@@ -810,6 +903,11 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 记录遥测数据
 	RecordRequest(inputTokens, outputTokens, req.Model)
 	GetTokenManager().RecordCall(success, isMultimodal)
+	RecordUsageFull(storageUsageRecord{
+		ApiKey: apiKey, Model: req.Model, InputTok: inputTokens,
+		OutputTok: outputTokens, Success: success, IsMultimodal: isMultimodal,
+		LatencyMs: int(time.Since(reqStartedAt).Milliseconds()),
+	})
 	LogDebug("Chat completed: model=%s, input_tokens=%d, output_tokens=%d, ip=%s, success=%v",
 		req.Model, inputTokens, outputTokens, clientIP, success)
 }

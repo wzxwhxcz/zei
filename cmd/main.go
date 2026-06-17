@@ -87,6 +87,11 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 func main() {
 	internal.LoadConfig()
 	internal.InitLogger()
+	if err := internal.InitStorage(); err != nil {
+		internal.LogError("存储后端初始化失败，回退到内存模式: %v", err)
+	}
+	internal.StartUsageLogger()
+	internal.InitRedis()
 	if err := internal.GetTokenManager().Start(); err != nil {
 		internal.LogError("TokenManager 启动失败: %v", err)
 	}
@@ -139,6 +144,7 @@ func main() {
 
 	http.HandleFunc("/admin/api/models", corsMiddleware(loggingMiddleware(internal.HandleAdminModels)))
 	http.HandleFunc("/admin/api/test", corsMiddleware(loggingMiddleware(internal.HandleAdminTestModel)))
+	http.HandleFunc("/admin/api/usage", corsMiddleware(loggingMiddleware(internal.HandleAdminUsage)))
 
 
 	addr := ":" + internal.Cfg.Port

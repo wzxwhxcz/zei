@@ -93,6 +93,9 @@ func InitLogger() {
 }
 
 func logMsg(level slog.Level, format string, v ...interface{}) {
+	if logger == nil {
+		return
+	}
 	if !logger.Enabled(context.Background(), level) {
 		return
 	}

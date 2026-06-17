@@ -96,6 +96,15 @@ func (tm *TokenManager) Stop() {
 
 // loadTokens 从 data 目录加载所有 token
 func (tm *TokenManager) loadTokens() error {
+	// 优先从存储后端加载（MySQL 或 FileBackend）。后端为空/出错时回退到直接读文件。
+	if b := storageBackend(); b != nil {
+		records, err := b.ListTokens()
+		if err == nil && len(records) > 0 {
+			tm.loadFromRecords(records)
+			return nil
+		}
+	}
+	// 回退：直接读 data/tokens.txt（FileBackend 未命中或后端不可用）
 	tokenFile := filepath.Join(tm.dataDir, "tokens.txt")
 
 	file, err := os.Open(tokenFile)
@@ -163,6 +172,35 @@ func (tm *TokenManager) loadTokens() error {
 		invalidateAnonymousPoolSlots()
 	}
 	return scanErr
+}
+
+// loadFromRecords 从存储后端的 TokenRecord 列表加载到内存（替代直接读文件）。
+func (tm *TokenManager) loadFromRecords(records []storageTokenRecord) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	oldTokens := tm.tokens
+	tm.tokens = make(map[string]*TokenInfo, len(records))
+	tm.validTokens = make([]string, 0, len(records))
+	for _, r := range records {
+		if oldInfo, exists := oldTokens[r.Token]; exists {
+			tm.tokens[r.Token] = oldInfo
+		} else {
+			info := &TokenInfo{Token: r.Token, Valid: r.Valid, Email: r.Email, UserID: r.UserID}
+			if info.Email == "" || info.UserID == "" {
+				if payload, err := DecodeJWTPayload(r.Token); err == nil && payload != nil {
+					info.Email, info.UserID = payload.Email, payload.ID
+				}
+			}
+			tm.tokens[r.Token] = info
+		}
+		if tm.tokens[r.Token].Valid {
+			tm.validTokens = append(tm.validTokens, r.Token)
+		}
+	}
+	LogInfo("已加载 %d 个 token（来自存储后端）", len(tm.validTokens))
+	if len(tm.validTokens) > 0 {
+		invalidateAnonymousPoolSlots()
+	}
 }
 
 // createExampleTokenFile 创建示例 token 文件
@@ -404,7 +442,8 @@ func (tm *TokenManager) HasValidUpstreamTokens() bool {
 	return len(tm.validTokens) > 0
 }
 
-// GetToken 获取一个有效 token（轮询）
+// GetToken 获取一个有效 token（轮询）。
+// Redis 启用时用原子轮询指针（多实例不抢），并跳过熔断中的 token。
 func (tm *TokenManager) GetToken() string {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -413,14 +452,31 @@ func (tm *TokenManager) GetToken() string {
 		return ""
 	}
 
-	token := tm.validTokens[tm.currentIndex%len(tm.validTokens)]
+	n := len(tm.validTokens)
+	// 轮询起点：Redis 原子指针优先，否则本地指针
+	start := tm.currentIndex % n
+	if rcIdx := RedisNextTokenIndex(n); rcIdx >= 0 {
+		start = rcIdx
+	}
 	tm.currentIndex++
 
-	// 增加使用计数
+	// 跳过熔断中的 token（最多试 n 次避免死循环）
+	for attempt := 0; attempt < n; attempt++ {
+		token := tm.validTokens[(start+attempt)%n]
+		if RedisIsTokenFailed(token) {
+			continue
+		}
+		if info, exists := tm.tokens[token]; exists {
+			info.UseCount++
+		}
+		return token
+	}
+
+	// 全部熔断：降级返回第一个（聊胜于无）
+	token := tm.validTokens[start]
 	if info, exists := tm.tokens[token]; exists {
 		info.UseCount++
 	}
-
 	return token
 }
 

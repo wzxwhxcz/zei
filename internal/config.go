@@ -20,7 +20,15 @@ type Config struct {
 	BackupTokens        []string // 支持多个 Backup Token（用于多模态，逗号分隔）
 
 	// Captcha Provider
-	CaptchaProviderURL string // e.g. http://127.0.0.1:9876
+	CaptchaProviderURL string // e.g. http://127.0.0.1:9876（老路径：只取 captcha token，Go 直连发 chat）
+	// CaptchaFullProxyURL 指向「JSDOM 全链路 chat 代理」provider。
+	// 设了就走全代理：整个 chat 请求转给 provider（同 JSDOM 环境拿 captcha+建会话+发 completions），
+	// 彻底绕开跨进程环境不一致导致的 F019 verify_failed。
+	CaptchaFullProxyURL string
+
+	// 持久化后端（可选，不设=文件存储 data/）
+	DatabaseURL string // MySQL DSN，如 user:pass@tcp(127.0.0.1:3306)/zai2api?parseTime=true
+	RedisURL    string // Redis URL，如 redis://127.0.0.1:6379/0
 
 	// Feature Configuration
 	DebugLogging            bool
@@ -120,6 +128,9 @@ func LoadConfig() {
 		AuthTokens:          getEnvStringSlice("AUTH_TOKEN"),
 		BackupTokens:        getEnvStringSlice("BACKUP_TOKEN"),
 		CaptchaProviderURL:  getEnvString("CAPTCHA_PROVIDER_URL", ""),
+		CaptchaFullProxyURL: getEnvString("CAPTCHA_FULL_PROXY_URL", ""),
+		DatabaseURL:         getEnvString("DATABASE_URL", ""),
+		RedisURL:            getEnvString("REDIS_URL", ""),
 
 		// Feature Configuration
 		DebugLogging:            getEnvBool("DEBUG_LOGGING", false),

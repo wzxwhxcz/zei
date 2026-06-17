@@ -16,6 +16,7 @@ var BaseModelMapping = map[string]string{
 	"GLM-5-Turbo":              "GLM-5-Turbo",
 	"GLM-5v-Turbo":             "GLM-5v-Turbo",
 	"GLM-5.1":                  "GLM-5.1",
+	"GLM-5.2":                  "glm-5.2",
 	"GLM-4.5-V":                "glm-4.5v",
 	"GLM-4.6-V":                "glm-4.6v",
 	"glm-4.6v":                 "glm-4.6v",
@@ -236,6 +237,9 @@ type ChatRequest struct {
 	FrequencyPenalty *float64    `json:"frequency_penalty,omitempty"`
 	Stop             interface{} `json:"stop,omitempty"`
 	User             string      `json:"user,omitempty"`
+	// ReasoningEffort: OpenAI 风格的思考强度 (minimal/low/medium/high/max)，
+	// 在全代理路径透传给 provider，映射成 z.ai 的 "high"/"max"。
+	ReasoningEffort  string      `json:"reasoning_effort,omitempty"`
 	StreamOptions    *struct {
 		IncludeUsage bool `json:"include_usage,omitempty"`
 	} `json:"stream_options,omitempty"`
