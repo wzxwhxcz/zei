@@ -92,6 +92,18 @@ func main() {
 	}
 	internal.StartUsageLogger()
 	internal.InitRedis()
+
+	// Captcha 是 z.ai 的硬性要求：必须配 CAPTCHA_FULL_PROXY_URL（全代理，推荐）
+	// 或 CAPTCHA_PROVIDER_URL（老路径）。两个都不设 → 每个请求都会被上游拒。
+	if internal.Cfg.CaptchaFullProxyURL == "" && internal.Cfg.CaptchaProviderURL == "" {
+		internal.LogError("========================================================")
+		internal.LogError("⚠️  未配置任何 Captcha 后端！")
+		internal.LogError("   CAPTCHA_FULL_PROXY_URL 和 CAPTCHA_PROVIDER_URL 都为空。")
+		internal.LogError("   z.ai 强制校验 captcha，所有请求必将返回 FRONTEND_CAPTCHA_REQUIRED。")
+		internal.LogError("   请至少设置一个（推荐 CAPTCHA_FULL_PROXY_URL=http://127.0.0.1:9876）。")
+		internal.LogError("========================================================")
+	}
+
 	if err := internal.GetTokenManager().Start(); err != nil {
 		internal.LogError("TokenManager 启动失败: %v", err)
 	}

@@ -20,10 +20,12 @@ type Config struct {
 	BackupTokens        []string // 支持多个 Backup Token（用于多模态，逗号分隔）
 
 	// Captcha Provider
-	CaptchaProviderURL string // e.g. http://127.0.0.1:9876（老路径：只取 captcha token，Go 直连发 chat）
+	// CaptchaProviderURL 老路径：Go 直连时从这里取 captcha token 注入请求。
+	// 日常用 CaptchaFullProxyURL（全代理），此项只在 /admin 健康检查 + 回退时用到。
+	CaptchaProviderURL string // e.g. http://127.0.0.1:9876
 	// CaptchaFullProxyURL 指向「JSDOM 全链路 chat 代理」provider。
 	// 设了就走全代理：整个 chat 请求转给 provider（同 JSDOM 环境拿 captcha+建会话+发 completions），
-	// 彻底绕开跨进程环境不一致导致的 F019 verify_failed。
+	// 彻底绕开跨进程环境不一致导致的 F019 verify_failed。设了之后 CaptchaProviderURL 不再参与请求。
 	CaptchaFullProxyURL string
 
 	// 持久化后端（可选，不设=文件存储 data/）
