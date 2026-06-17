@@ -109,7 +109,8 @@ function createWindow() {
 // ─── 窗口池：预热 N 个 armed window，每次请求用一个、用完丢弃、后台补一个 ───
 // 每个 window 只用一次（避免在同 window 上重复 initAliyunCaptcha 的兼容性问题），
 // 用完丢弃让 GC 回收，同时后台预热线程补一个新 window 进池。
-const POOL_SIZE = Number(process.env.WINDOW_POOL_SIZE || 2);
+// 并发上限 = POOL_SIZE。每个 JSDOM window ~50-80MB 内存，按机器内存调整。
+const POOL_SIZE = Number(process.env.WINDOW_POOL_SIZE || 4);
 const pool = [];          // armed window 队列
 const waiters = [];       // 排队等待 window 的请求（promise resolve）
 let warming = 0;          // 正在预热中的数量（防止过度补窗）

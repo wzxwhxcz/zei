@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -599,6 +600,26 @@ type UpstreamResult struct {
 
 const RetryableErr = "INTERNAL_ERROR"
 
+// fullProxySem 限制到 captcha-provider 的并发请求数（= WINDOW_POOL_SIZE）。
+// 用带缓冲 channel 实现信号量：acquire 写入、release 读出。
+// 懒初始化（首次使用时按 Cfg.FullProxyConcurrency 创建），避免依赖 config 初始化顺序。
+var (
+	fullProxySem    chan struct{}
+	fullProxySemOnce sync.Once
+)
+
+func getFullProxySem() chan struct{} {
+	fullProxySemOnce.Do(func() {
+		n := 4
+		if Cfg != nil && Cfg.FullProxyConcurrency > 0 {
+			n = Cfg.FullProxyConcurrency
+		}
+		fullProxySem = make(chan struct{}, n)
+		LogInfo("Full-proxy 并发限制: %d", n)
+	})
+	return fullProxySem
+}
+
 // isTransientError 判断错误是否为「瞬时/容量」类（重试 + 退避可能恢复）。
 // MODEL_CONCURRENCY_LIMIT（模型容量满）、INTERNAL_ERROR（上游内部错误）属于此类。
 // 这类错误换 token 无意义，但等一会再试可能恢复，所以重试时应加退避延迟。
@@ -829,6 +850,15 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var lastError string
 	success := false
 	var token string
+
+	// 全代理路径并发信号量：限制到 provider 的并发数（= WINDOW_POOL_SIZE）。
+	// 超出的请求在此排队（带缓冲 channel），避免 provider 窗口池耗尽后大面积超时。
+	// 必须覆盖整个请求生命周期（含流式消费），所以 defer 到函数结束才释放。
+	if Cfg.CaptchaFullProxyURL != "" {
+		sem := getFullProxySem()
+		sem <- struct{}{}        // acquire（满则阻塞排队）
+		defer func() { <-sem }() // release（函数返回时）
+	}
 
 	// 重试循环
 	maxRetries := max(Cfg.RetryCount, 0)

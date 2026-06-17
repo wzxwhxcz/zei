@@ -27,6 +27,9 @@ type Config struct {
 	// 设了就走全代理：整个 chat 请求转给 provider（同 JSDOM 环境拿 captcha+建会话+发 completions），
 	// 彻底绕开跨进程环境不一致导致的 F019 verify_failed。设了之后 CaptchaProviderURL 不再参与请求。
 	CaptchaFullProxyURL string
+	// FullProxyConcurrency 限制到 captcha-provider 的并发请求数（应 = provider 的 WINDOW_POOL_SIZE）。
+	// 超出的请求在 Go 侧排队（带缓冲 channel 信号量），避免 provider 窗口池耗尽后大面积超时。
+	FullProxyConcurrency int
 
 	// 持久化后端（可选，不设=文件存储 data/）
 	DatabaseURL string // MySQL DSN，如 user:pass@tcp(127.0.0.1:3306)/zai2api?parseTime=true
@@ -131,6 +134,7 @@ func LoadConfig() {
 		BackupTokens:        getEnvStringSlice("BACKUP_TOKEN"),
 		CaptchaProviderURL:  getEnvString("CAPTCHA_PROVIDER_URL", ""),
 		CaptchaFullProxyURL: getEnvString("CAPTCHA_FULL_PROXY_URL", ""),
+		FullProxyConcurrency: getEnvInt("FULL_PROXY_CONCURRENCY", 4),
 		DatabaseURL:         getEnvString("DATABASE_URL", ""),
 		RedisURL:            getEnvString("REDIS_URL", ""),
 
