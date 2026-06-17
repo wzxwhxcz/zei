@@ -6,3 +6,4 @@ data/
 # 编译产物
 *.exe
 *.exe~
+*_log.txt 
