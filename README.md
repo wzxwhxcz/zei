@@ -162,6 +162,78 @@ curl http://localhost:8000/v1/chat/completions \
 | `DEBUG_LOGGING` | false | 调试日志 |
 | `LOG_LEVEL` | info | 日志级别 |
 
+## 🤗 部署到 HuggingFace Spaces
+
+HF Spaces 适合免费/无服务器部署，但有几个**关键约束**必须遵守，否则会一直卡在 "Starting"：
+
+> ⚠️ **HF Spaces 要求监听 7860 端口**！健康检查只探测 7860。如果服务监听别的端口（如默认 8000），HF 永远认为没 ready → 一直显示 Starting。
+
+### 方式一：Space 设置里加环境变量（最简单）
+
+在 HF Space 的 **Settings → Repository secrets / Variables** 里加：
+```
+PORT=7860
+```
+（Go proxy 会读到这个 env，监听 7860）
+
+同时把 `AUTH_TOKEN`、`BACKUP_TOKEN`、`DATABASE_URL` 等也作为 secrets 加进去（不要写进 Dockerfile/代码，会泄露）。
+
+### 方式二：Dockerfile 里写死端口
+
+HF Space 的 Dockerfile 里加：
+```dockerfile
+ENV PORT=7860
+ENV HOST=0.0.0.0
+```
+
+### HF Spaces Dockerfile 示例（git clone 仓库 + 双进程启动）
+
+```dockerfile
+FROM golang:1.25-bookworm
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Node.js（captcha-provider 用）
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs git curl && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 克隆仓库
+RUN git clone https://github.com/wzxwhxcz/zei.git /app
+WORKDIR /app
+
+# 编译
+RUN cd captcha-provider && npm install
+RUN go mod download && go build -o zai-proxy ./cmd/main.go
+
+# ★ HF Spaces 必须监听 7860
+ENV PORT=7860
+ENV HOST=0.0.0.0
+
+# 双进程启动：captcha-provider + Go proxy
+RUN printf '#!/bin/bash\n\
+echo "Starting Node.js Captcha Provider..."\n\
+(cd captcha-provider && node server.js) & PROVIDER_PID=$!\n\
+for i in $(seq 1 30); do\n\
+  if curl -sf http://127.0.0.1:9876/health >/dev/null 2>&1; then break; fi\n\
+  sleep 1\n\
+done\n\
+echo "Starting Go Proxy on port ${PORT}..."\n\
+./zai-proxy & PROXY_PID=$!\n\
+wait -n $PROVIDER_PID $PROXY_PID\n\
+kill $PROVIDER_PID $PROXY_PID 2>/dev/null\n\
+exit 1\n' > start.sh && chmod +x start.sh
+
+EXPOSE 7860
+CMD ["./start.sh"]
+```
+
+### HF Spaces 注意事项
+- **端口**：必须 7860（否则一直 Starting）
+- **绑定地址**：`HOST=0.0.0.0`（HF 需要从外部访问，127.0.0.1 不行）
+- **出站端口限制**：HF Spaces 只允许出站到 80/443/8080。captcha-provider 调阿里云验证码（https，443）没问题；但**内部的 9876 端口是容器内通信**，不受这个限制。
+- **持久化**：HF Spaces 容器是临时的，重启丢数据。**务必配 `DATABASE_URL`（TiDB/PlanetScale 等云 MySQL）**，否则 token/api key 重启就没了。
+- **Secrets**：敏感信息（token、DB 密码）用 Space 的 Repository secrets，别写进 Dockerfile。
+
 ## 🔑 获取 Z.AI Token
 
 1. 打开 [chat.z.ai](https://chat.z.ai) 并登录
