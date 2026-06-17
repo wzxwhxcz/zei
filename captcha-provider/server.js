@@ -15,9 +15,11 @@ const chatProxy = require('./chat_proxy.cjs');
 const PORT = Number(process.env.PORT || 9876);
 const HOST = process.env.HOST || '127.0.0.1';
 const SECRET = process.env.SECRET || '';
-// 真实配置来自 prod-fe-1.1.61 前端 Grt：REGION=sgp, PREFIX=no8xfe, SCENE_ID=36qgs6xb, MODE=embed
-// （旧的 didk33e0 / popup 路径已被上游废弃，返回 verify_code F019）
-const SCENE_ID = process.env.SCENE_ID || '36qgs6xb';
+// 老路径 /token 用的 scene（solver.cjs 的 popup/traceless 模式）。
+// 注意：36qgs6xb（前端 embed 主配置）在 JSDOM 里跑不通（network error），
+// 只有 didk33e0 能出 token。F019 是跨进程环境不一致导致，非 scene 问题。
+// 全代理路径(CAPTCHA_FULL_PROXY_URL)在 chat_proxy.cjs 内部用自己的 scene，与此无关。
+const SCENE_ID = process.env.SCENE_ID || 'didk33e0';
 
 // Token 预取池配置
 const POOL_SIZE = Number(process.env.POOL_SIZE || 5);       // 池中保持的 token 数量
@@ -123,6 +125,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && req.url === '/token') {
+    // 老路径 token 池惰性启动（首次访问 /token 才填，避免启动刷屏）
+    if (typeof server._ensureTokenPool === 'function') server._ensureTokenPool();
     if (!ready) {
       return sendJson(res, 503, { error: 'not ready', lastError });
     }
@@ -210,17 +214,21 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, async () => {
   console.log(`[provider] zai-captcha-provider (JSDOM/execFile) listening on http://${HOST}:${PORT}`);
-  console.log(`[provider] captcha token pool: ${POOL_SIZE}, TTL: ${TOKEN_TTL}ms`);
-  try {
-    // 初始填充 captcha token 池
-    await refillPool();
-    console.log(`[provider] Initial captcha token pool filled: ${tokenPool.length}`);
-    // 定期补充
+  console.log(`[provider] captcha token pool: ${POOL_SIZE}, TTL: ${TOKEN_TTL}ms (老路径 /token，按需启用)`);
+  // 老路径 captcha token 池改为惰性填充：
+  // 全代理路径(CAPTCHA_FULL_PROXY_URL)才是主路径，老 /token 池多数情况用不到。
+  // 启动时不再狂填（避免 solver 报错刷屏），首次访问 /token 时才填 + 起定时器。
+  let tokenPoolStarted = false;
+  function ensureTokenPool() {
+    if (tokenPoolStarted) return;
+    tokenPoolStarted = true;
+    console.log('[provider] 首次访问 /token，启动老路径 token 池...');
+    refillPool().catch(() => {});
     setInterval(refillPool, REFILL_INTERVAL);
-  } catch (err) {
-    console.error('[provider] Startup error:', err.message);
-    lastError = err.message;
   }
+  // 暴露给 /token 路由用
+  server._ensureTokenPool = ensureTokenPool;
+
   // 预热 JSDOM 全链路 chat 窗口池（非阻塞，后台补）
   chatProxy.initPool().then(() => {
     console.log('[chat-proxy] window pool ready');

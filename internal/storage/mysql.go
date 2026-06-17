@@ -15,15 +15,17 @@ type MysqlBackend struct {
 }
 
 // NewMysqlBackend 连接 MySQL、建表、测试连接。
+//
+// DSN 规范化（用户给的 DATABASE_URL 可能缺参数）：
+//   - 自动补 parseTime=true（DATETIME 扫描成 time.Time 必需）
+//   - 自动补 tls=skip-verify：TiDB Cloud Serverless / PlanetScale / 大多数云 MySQL 强制 TLS，
+//     不带 tls 会报 "Connections using insecure transport are prohibited"。
+//     skip-verify = 走 TLS 但不校验证书 CN（云 DB 自签证书也能连）。
+//     用户若在 DSN 里显式带了 tls=xxx 则尊重用户设置。
 func NewMysqlBackend(dsn string) (*MysqlBackend, error) {
-	// 确保 DSN 带 parseTime=true（json/jsonl 里用到 time.Time）。
-	if !containsParam(dsn, "parseTime") {
-		sep := "?"
-		if contains(dsn, "?") {
-			sep = "&"
-		}
-		dsn = dsn + sep + "parseTime=true"
-	}
+	dsn = ensureDSNParam(dsn, "parseTime", "true")
+	dsn = ensureDSNParam(dsn, "tls", "skip-verify")
+
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open mysql: %w", err)
@@ -41,6 +43,38 @@ func NewMysqlBackend(dsn string) (*MysqlBackend, error) {
 		return nil, err
 	}
 	return b, nil
+}
+
+// ensureDSNParam 确保 DSN 里带某个参数（用户没显式设才补；已有则尊重用户）。
+// 形如 user:pass@tcp(host)/db?k1=v1&k2=v2。
+func ensureDSNParam(dsn, key, val string) string {
+	// 已有该参数（k= 形式）则不动
+	if hasDSNParam(dsn, key) {
+		return dsn
+	}
+	sep := "?"
+	if containsStr(dsn, "?") {
+		sep = "&"
+	}
+	return dsn + sep + key + "=" + val
+}
+
+// hasDSNParam 判断 DSN 的 query 部分是否已有某个 key（精确匹配 k=v，避免 tls 误匹配 tlsKey 之类）。
+func hasDSNParam(dsn, key string) bool {
+	q := dsn
+	if i := indexOfStr(dsn, "?"); i >= 0 {
+		q = dsn[i+1:]
+	}
+	for _, pair := range splitStr(q, "&") {
+		k := pair
+		if i := indexOfStr(pair, "="); i >= 0 {
+			k = pair[:i]
+		}
+		if k == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *MysqlBackend) createTables() error {
@@ -228,22 +262,30 @@ func nullTime(t time.Time) interface{} {
 	return t
 }
 
-func containsParam(dsn, param string) bool {
-	return contains(dsn, param+"=") || contains(dsn, param+"&") || hasSuffixParam(dsn, param)
+func containsStr(s, sub string) bool {
+	return indexOfStr(s, sub) >= 0
 }
 
-func hasSuffixParam(dsn, param string) bool {
-	// 形如 ?parseTime=true 结尾
-	return len(dsn) > len(param) && dsn[len(dsn)-len(param):] == param && contains(dsn, "?")
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (func() bool {
-		for i := 0; i+len(sub) <= len(s); i++ {
-			if s[i:i+len(sub)] == sub {
-				return true
-			}
+func indexOfStr(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
 		}
-		return false
-	})()
+	}
+	return -1
+}
+
+func splitStr(s, sep string) []string {
+	var out []string
+	for {
+		i := indexOfStr(s, sep)
+		if i < 0 {
+			if s != "" {
+				out = append(out, s)
+			}
+			return out
+		}
+		out = append(out, s[:i])
+		s = s[i+len(sep):]
+	}
 }
