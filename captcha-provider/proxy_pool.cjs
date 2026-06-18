@@ -27,13 +27,15 @@ const MAX_FAILS = 2;                   // 失败 2 次淘汰
 function buildListUrl() {
   if (process.env.PROXY_LIST_URL) return process.env.PROXY_LIST_URL;
   const proto = process.env.PROXY_PROTOCOL || 'socks5';
-  const country = process.env.PROXY_COUNTRY || 'all';
+  const country = process.env.PROXY_COUNTRY || 'cn,hk';
   const timeout = process.env.PROXY_TIMEOUT || '5000';
+  const anonymity = process.env.PROXY_ANONYMITY || 'elite';
   const params = new URLSearchParams({
     request: 'display_proxies',
     protocol: proto,
     country: country,
     timeout: timeout,
+    anonymity: anonymity,
     proxy_format: 'protocolipport',
     format: 'text',
   });
