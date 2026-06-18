@@ -26,7 +26,9 @@ const MAX_FAILS = 2;                   // 失败 2 次淘汰
 
 function buildListUrl() {
   if (process.env.PROXY_LIST_URL) return process.env.PROXY_LIST_URL;
-  const proto = process.env.PROXY_PROTOCOL || 'socks5';
+  // 默认 http 协议（兼容性最好，https-proxy-agent 无 peer dep 问题）；
+  // SOCKS5 需要 socks-proxy-agent，某些环境可能装不上（设 PROXY_PROTOCOL=socks5 启用）。
+  const proto = process.env.PROXY_PROTOCOL || 'http';
   const country = process.env.PROXY_COUNTRY || 'cn,hk';
   const timeout = process.env.PROXY_TIMEOUT || '5000';
   const anonymity = process.env.PROXY_ANONYMITY || 'elite';
@@ -42,10 +44,25 @@ function buildListUrl() {
   return `https://api.proxyscrape.com/v4/free-proxy-list/get?${params}`;
 }
 
+// 检测 socks-proxy-agent 是否可用（某些环境 npm install 会因 peer dep 冲突漏装）
+let _socksAvailable = null; // null=未检测, true/false
+function isSocksAvailable() {
+  if (_socksAvailable !== null) return _socksAvailable;
+  try {
+    require('socks-proxy-agent');
+    _socksAvailable = true;
+  } catch {
+    _socksAvailable = false;
+    console.warn('[proxy-pool] socks-proxy-agent 不可用，SOCKS 代理将被跳过（HTTP 代理正常）');
+  }
+  return _socksAvailable;
+}
+
 function createAgent(proxyUrl) {
   // socks5:// → SocksProxyAgent；http:// → HttpsProxyAgent
   try {
     if (proxyUrl.startsWith('socks')) {
+      if (!isSocksAvailable()) return null; // SOCKS 模块不可用，跳过
       const { SocksProxyAgent } = require('socks-proxy-agent');
       return new SocksProxyAgent(proxyUrl);
     } else {
@@ -53,6 +70,7 @@ function createAgent(proxyUrl) {
       return new HttpsProxyAgent(proxyUrl);
     }
   } catch (e) {
+    console.error(`[proxy-pool] createAgent 失败 ${proxyUrl}: ${e.message}`);
     return null;
   }
 }
@@ -81,12 +99,18 @@ async function fetchList() {
 
 function refreshAgents(proxyUrls) {
   const newAgents = [];
+  let failCount = 0;
   for (const url of proxyUrls) {
     if (badSet.has(url)) continue; // 跳过已淘汰的
     const agent = createAgent(url);
     if (agent) {
       newAgents.push({ url, agent, fails: 0, lastUsed: 0 });
+    } else {
+      failCount++;
     }
+  }
+  if (proxyUrls.length > 0 && newAgents.length === 0) {
+    console.error(`[proxy-pool] 全部 ${proxyUrls.length} 个代理 createAgent 失败！前3个原始格式: ${proxyUrls.slice(0, 3).join(', ')}`);
   }
   // 保留之前还活着的（避免频繁重建 agent 对象）
   const oldAlive = agents.filter(a => a.fails < MAX_FAILS && !badSet.has(a.url));
