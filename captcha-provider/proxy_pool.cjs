@@ -141,10 +141,10 @@ function refreshAgents(proxyUrls) {
   }
   // 保留之前还活着的（避免频繁重建 agent 对象）
   const oldAlive = agents.filter(a => a.fails < MAX_FAILS && !badSet.has(a.url));
-  const seen = new Set(newAgents.map(a => a.url).concat(oldAlive.map(a => a.url)));
+  const oldSeen = new Set(oldAlive.map(a => a.url)); // 只记录旧的，不记新的
   const merged = [];
   for (const a of oldAlive) merged.push(a);
-  for (const a of newAgents) if (!seen.has(a.url)) { merged.push(a); seen.add(a.url); }
+  for (const a of newAgents) if (!oldSeen.has(a.url)) { merged.push(a); }
   agents = merged;
   console.log(`[proxy-pool] 可用代理: ${agents.length} 个（淘汰 ${badSet.size} 个）`);
 }
