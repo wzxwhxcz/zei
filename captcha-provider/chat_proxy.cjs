@@ -107,52 +107,83 @@ class NodeXHR {
   }
   send(body) {
     this._body = body;
-    const u = new URL(this._url);
+    // UPSTREAM_BASE_URL（CF Worker 反代）：把 chat.z.ai 替换成 CF Worker 域名
+    // CF 的 IP 不被阿里云 CDN 风控，解决 HF 数据中心 IP 405 问题
+    let sendUrl = this._url;
+    const upstreamBase = process.env.UPSTREAM_BASE_URL || '';
+    if (upstreamBase && sendUrl.includes('chat.z.ai')) {
+      sendUrl = sendUrl.replace('https://chat.z.ai', upstreamBase.replace(/\/$/, ''));
+    }
+    const u = new URL(sendUrl);
     const lib = u.protocol === 'https:' ? https : http;
-    const opts = {
-      method: this._method,
-      hostname: u.hostname,
-      port: u.port || (u.protocol === 'https:' ? 443 : 80),
-      path: u.pathname + u.search,
-      headers: { ...this._headers },
-    };
-    // 挂代理（数据中心 IP 被风控时用代理池出去）
-    const proxyEntry = proxyPool.nextAgent();
-    if (proxyEntry) opts.agent = proxyEntry.agent;
-    this._proxyEntry = proxyEntry; // 记住用的哪个代理，失败时标记
-    opts.headers['Connection'] = 'keep-alive';
-    this._req = lib.request(opts, (res) => {
-      this.status = res.statusCode || 0;
-      this.statusText = res.statusMessage || '';
-      this._resHeaders = res.headers || {};
-      this._fire(2); // HEADERS_RECEIVED
-      this._fire(3); // LOADING
-      let chunks = [];
-      res.on('data', (chunk) => {
-        chunks.push(chunk);
-        // 实时更新 responseText + 触发 onprogress/readystatechange
-        this.responseText += chunk.toString('utf8');
-        if (this.onprogress) { try { this.onprogress(); } catch {} }
+    const maxProxyRetries = 8;
+    let attempt = 0;
+
+    const trySend = () => {
+      const opts = {
+        method: this._method,
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        path: u.pathname + u.search,
+        headers: { ...this._headers },
+      };
+      // 挂代理
+      const proxyEntry = proxyPool.nextAgent();
+      if (proxyEntry) opts.agent = proxyEntry.agent;
+      this._proxyEntry = proxyEntry;
+      opts.headers['Connection'] = 'keep-alive';
+
+      this._req = lib.request(opts, (res) => {
+        this.status = res.statusCode || 0;
+        this.statusText = res.statusMessage || '';
+        this._resHeaders = res.headers || {};
+        this._fire(2);
         this._fire(3);
+        let chunks = [];
+        res.on('data', (chunk) => {
+          chunks.push(chunk);
+          this.responseText += chunk.toString('utf8');
+          if (this.onprogress) { try { this.onprogress(); } catch {} }
+          this._fire(3);
+        });
+        res.on('end', () => {
+          this.responseText = Buffer.concat(chunks).toString('utf8');
+          this._fire(4);
+          if (this.onload) { try { this.onload(); } catch {} }
+        });
       });
-      res.on('end', () => {
-        this.responseText = Buffer.concat(chunks).toString('utf8');
-        this._fire(4); // DONE
-        if (this.onload) { try { this.onload(); } catch {} }
+
+      this._req.on('error', (e) => {
+        // 代理失败：标记淘汰，换下一个代理重试
+        if (this._proxyEntry) proxyPool.markBad(this._proxyEntry);
+        attempt++;
+        if (attempt < maxProxyRetries) {
+          console.log(`[NodeXHR] 代理失败(${attempt}/${maxProxyRetries})，换下一个: ${e.message}`);
+          this.responseText = ''; // 清空之前的数据
+          trySend(); // 重试
+        } else {
+          if (this.onerror) { try { this.onerror(e); } catch {} }
+        }
       });
-    });
-    this._req.on('error', (e) => {
-      // 代理失败：标记淘汰，下次换一个
-      if (this._proxyEntry) proxyPool.markBad(this._proxyEntry);
-      if (this.onerror) { try { this.onerror(e); } catch {} }
-    });
-    if (this.timeout > 0) this._req.setTimeout(this.timeout, () => {
-      if (this._proxyEntry) proxyPool.markBad(this._proxyEntry);
-      this._req.destroy();
-      if (this.ontimeout) { try { this.ontimeout(); } catch {} }
-    });
-    if (body) this._req.write(body);
-    this._req.end();
+
+      if (this.timeout > 0) this._req.setTimeout(this.timeout, () => {
+        if (this._proxyEntry) proxyPool.markBad(this._proxyEntry);
+        this._req.destroy();
+        attempt++;
+        if (attempt < maxProxyRetries) {
+          console.log(`[NodeXHR] 代理超时(${attempt}/${maxProxyRetries})，换下一个`);
+          this.responseText = '';
+          trySend();
+        } else {
+          if (this.ontimeout) { try { this.ontimeout(); } catch {} }
+        }
+      });
+
+      if (this._body) this._req.write(this._body);
+      this._req.end();
+    };
+
+    trySend();
   }
   abort() { if (this._req) this._req.destroy(); }
 }
