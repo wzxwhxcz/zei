@@ -42,6 +42,7 @@ async function fetchFromProxyPoolAPI() {
       res.on('end', () => {
         try {
           const parsed = JSON.parse(data);
+          console.log(`[proxy-pool] API 原始响应前100字符: ${data.substring(0, 100)}`);
           // go_proxy_pool 格式：count=1 返回单个对象，count>1 返回数组
           const arr = Array.isArray(parsed) ? parsed : [parsed];
           const urls = arr
@@ -51,7 +52,8 @@ async function fetchFromProxyPoolAPI() {
               const proto = (p.Type || 'HTTP').includes('SOCKET') ? 'socks5' : 'http';
               return `${proto}://${p.Ip}:${p.Port}`;
             });
-          console.log(`[proxy-pool] 从代理池API获取 ${urls.length} 个代理`);
+          console.log(`[proxy-pool] 从代理池API获取 ${urls.length} 个代理（原始 ${arr.length} 条）`);
+          if (urls.length === 0) console.error(`[proxy-pool] 代理池API返回但过滤后为空！第一条数据: ${JSON.stringify(arr[0])}`);
           resolve(urls);
         } catch (e) {
           console.error(`[proxy-pool] 代理池API解析失败: ${e.message}`);
@@ -121,6 +123,7 @@ async function fetchList() {
 }
 
 function refreshAgents(proxyUrls) {
+  console.log(`[proxy-pool] refreshAgents: 输入 ${proxyUrls.length} 个 URL: ${proxyUrls.slice(0,3).join(', ')}`);
   const newAgents = [];
   let failCount = 0;
   for (const url of proxyUrls) {
@@ -132,6 +135,7 @@ function refreshAgents(proxyUrls) {
       failCount++;
     }
   }
+  console.log(`[proxy-pool] refreshAgents: createAgent 成功 ${newAgents.length}/${proxyUrls.length}`);
   if (proxyUrls.length > 0 && newAgents.length === 0) {
     console.error(`[proxy-pool] 全部 ${proxyUrls.length} 个代理 createAgent 失败！前3个原始格式: ${proxyUrls.slice(0, 3).join(', ')}`);
   }
