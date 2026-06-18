@@ -324,6 +324,50 @@ func HandleAdminTokenAdd(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleAdminTokenBulk POST /admin/api/tokens/bulk
+// body: {"tokens": ["eyJ...", "email----pass----eyJ..."]} 或 {"tokens": "eyJ...\neyJ..."}
+// 批量导入：一次内存操作 + 一次写文件，比逐个快得多。
+func HandleAdminTokenBulk(w http.ResponseWriter, r *http.Request) {
+	if !adminAuth(r) {
+		adminWriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if r.Method != http.MethodPost {
+		adminWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		Tokens []string `json:"tokens"`
+		Raw    string   `json:"raw"` // 也支持直接传多行文本
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		adminWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	// 合并 tokens 数组 + raw 文本按行分割
+	inputs := body.Tokens
+	if body.Raw != "" {
+		for _, line := range strings.Split(body.Raw, "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				inputs = append(inputs, line)
+			}
+		}
+	}
+	if len(inputs) == 0 {
+		adminWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "no tokens"})
+		return
+	}
+	added, skipped, failed, _ := GetTokenManager().AddTokens(inputs)
+	adminWriteJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":      true,
+		"added":   added,
+		"skipped": skipped,
+		"failed":  failed,
+		"total":   len(inputs),
+	})
+}
+
 // HandleAdminTokenDelete DELETE /admin/api/tokens
 // body: {"token": "完整的 token"}
 func HandleAdminTokenDelete(w http.ResponseWriter, r *http.Request) {

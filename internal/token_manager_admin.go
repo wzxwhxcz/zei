@@ -86,6 +86,72 @@ func (tm *TokenManager) AddToken(tokenInput string) (*TokenInfo, error) {
 	return info, nil
 }
 
+// AddTokens 批量添加 token（一次内存操作 + 一次写文件，比逐个 AddToken 快得多）。
+// 返回 {added, skipped(重复), failed(格式错误)}。
+func (tm *TokenManager) AddTokens(inputs []string) (added, skipped, failed int, addedInfos []*TokenInfo) {
+	// 先解析全部 + 去重
+	type parsed struct{ token string; payload *JWTPayload }
+	var valid []parsed
+	seen := make(map[string]bool)
+	for _, input := range inputs {
+		token := extractTokenFromInput(input)
+		if token == "" {
+			failed++
+			continue
+		}
+		if seen[token] {
+			skipped++
+			continue
+		}
+		payload, err := DecodeJWTPayload(token)
+		if err != nil || payload == nil {
+			failed++
+			continue
+		}
+		seen[token] = true
+		valid = append(valid, parsed{token, payload})
+	}
+
+	// 一次加锁，批量入内存
+	tm.mu.Lock()
+	for _, p := range valid {
+		if _, exists := tm.tokens[p.token]; exists {
+			skipped++
+			continue
+		}
+		info := &TokenInfo{Token: p.token, Email: p.payload.Email, UserID: p.payload.ID, Valid: true}
+		tm.tokens[p.token] = info
+		tm.validTokens = append(tm.validTokens, p.token)
+		addedInfos = append(addedInfos, info)
+		added++
+	}
+	tm.mu.Unlock()
+
+	// 一次写文件（不是每个 token 写一次）
+	if added > 0 {
+		if err := tm.writeTokensToFile(); err != nil {
+			LogWarn("批量写入 tokens.txt 失败: %v", err)
+		}
+		// 异步验证全部新 token（后台，不阻塞返回）
+		for _, info := range addedInfos {
+			go func(t string) {
+				valid := tm.validateToken(t)
+				tm.mu.Lock()
+				if ti, ok := tm.tokens[t]; ok {
+					ti.Valid = valid
+				}
+				if !valid {
+					tm.rebuildValidTokensLocked()
+				}
+				tm.mu.Unlock()
+			}(info.Token)
+		}
+		invalidateAnonymousPoolSlots()
+	}
+	LogInfo("批量添加 token: +%d（重复 %d，失败 %d）", added, skipped, failed)
+	return
+}
+
 // RemoveToken 从 TokenManager 删除一个 token，并更新文件
 func (tm *TokenManager) RemoveToken(token string) error {
 	tm.mu.Lock()

@@ -1019,44 +1019,41 @@ async function submitAddToken() {
     $('addTokenErr').textContent = '请粘贴至少一个 token';
     return;
   }
-  const tokens = raw.split(/[\n\r]+/).map(s => s.trim()).filter(Boolean);
   const btn = $('addTokenBtn');
   btn.disabled = true;
   btn.textContent = '添加中...';
   $('addTokenErr').textContent = '';
 
-  let ok = 0, fail = 0;
-  const errors = [];
-  for (const tk of tokens) {
-    try {
-      const r = await fetch('/admin/api/tokens', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({token: tk}),
-      });
-      const d = await r.json();
-      if (r.ok && d.ok) {
-        ok++;
+  try {
+    // 批量导入（一次请求，比逐个快得多）
+    const r = await fetch('/admin/api/tokens/bulk', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({raw: raw}),
+    });
+    const d = await r.json();
+    btn.disabled = false;
+    btn.textContent = '添加';
+
+    if (r.ok && d.ok) {
+      let msg = `添加成功 ${d.added} 个`;
+      if (d.skipped > 0) msg += `，重复跳过 ${d.skipped} 个`;
+      if (d.failed > 0) msg += `，失败 ${d.failed} 个`;
+      toast(msg, d.added > 0 ? 'ok' : 'err');
+      if (d.failed > 0) {
+        $('addTokenErr').textContent = `失败 ${d.failed} 个（格式错误或无效 JWT）`;
       } else {
-        fail++;
-        errors.push(`${tk.slice(0,20)}...: ${d.error || '未知错误'}`);
+        closeAddToken();
       }
-    } catch (e) {
-      fail++;
-      errors.push(`${tk.slice(0,20)}...: ${e.message}`);
+      loadTokens();
+    } else {
+      $('addTokenErr').textContent = d.error || '导入失败';
     }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '添加';
+    $('addTokenErr').textContent = e.message;
   }
-
-  btn.disabled = false;
-  btn.textContent = '添加';
-
-  if (ok > 0) toast(`添加成功 ${ok} 个 token`, 'ok');
-  if (fail > 0) {
-    $('addTokenErr').textContent = `失败 ${fail} 个: ` + errors.slice(0, 3).join('; ');
-  } else {
-    closeAddToken();
-  }
-  loadTokens();
 }
 
 async function deleteToken(token, email) {
