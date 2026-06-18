@@ -481,6 +481,16 @@ async function handleChat(req, callbacks = {}) {
         'Content-Type': 'application/json',
         'Accept-Language': ACCEPT_LANGUAGE,
         'X-Region': 'overseas',
+        // 浏览器指纹 header（z.ai CDN 用这些判断是否真实浏览器，缺失会 403/405）
+        'Accept': '*/*',
+        'Origin': 'https://chat.z.ai',
+        'Referer': `https://chat.z.ai/c/${chatId}`,
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'sec-ch-ua': '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
       },
       JSON.stringify(body),
       { onChunk: callbacks.onChunk, onHeaders: callbacks.onHeaders, timeoutMs: 300000 });
