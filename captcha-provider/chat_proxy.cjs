@@ -74,6 +74,25 @@ function nowVars() {
 // 劫持 JSDOM 的 window.XMLHttpRequest，绕过 JSDOM XHR 的 CORS 预检/TLS 问题。
 // 在 HF Spaces 上，JSDOM 默认 XHR 发请求被阿里云 CDN 返回 405（可能是 CORS 预检
 // 触发 OPTIONS 或 TLS 指纹问题）。用 Node 原生 https 直接发，不走 JSDOM 的 XHR。
+// 代理支持：设了 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY 时，NodeXHR 走代理出去。
+// HF Spaces 数据中心 IP 被阿里云 CDN 风控（Node TLS 指纹 + 数据中心 IP → 405），
+// 挂代理用干净 IP 出去即可解决。
+let _proxyAgent = null;
+function getProxyAgent() {
+  if (_proxyAgent !== null) return _proxyAgent;
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.ALL_PROXY || '';
+  if (!proxyUrl) { _proxyAgent = false; return false; }
+  try {
+    const { HttpsProxyAgent } = require('https-proxy-agent');
+    _proxyAgent = new HttpsProxyAgent(proxyUrl);
+    console.log(`[chat-proxy] 使用代理: ${proxyUrl.replace(/\/\/.*@/, '//***@')}`);
+  } catch (e) {
+    console.error('[chat-proxy] 代理加载失败，直连:', e.message);
+    _proxyAgent = false;
+  }
+  return _proxyAgent;
+}
+
 class NodeXHR {
   constructor() {
     this.readyState = 0;
@@ -111,7 +130,9 @@ class NodeXHR {
       path: u.pathname + u.search,
       headers: { ...this._headers },
     };
-    // 禁用 keep-alive 连接池复用（避免跨请求串扰）
+    // 挂代理（数据中心 IP 被风控时用代理出去）
+    const agent = getProxyAgent();
+    if (agent) opts.agent = agent;
     opts.headers['Connection'] = 'keep-alive';
     this._req = lib.request(opts, (res) => {
       this.status = res.statusCode || 0;
