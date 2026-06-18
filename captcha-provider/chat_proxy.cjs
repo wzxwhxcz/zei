@@ -166,10 +166,8 @@ function createWindow() {
     cookieJar: new CookieJar(),
     userAgent: UA,
     beforeParse(window) {
-      // ★ 关键：劫持 XMLHttpRequest，用 Node 原生 https 替代 JSDOM 的 XHR。
-      // JSDOM 默认 XHR 在 HF Spaces 上发请求被阿里云 CDN 返回 405（CORS/TLS 问题）。
-      // Node 原生 https 不触发 CORS 预检，直接发 POST，绕过此问题。
-      window.XMLHttpRequest = NodeXHR;
+      // 注意：不全局劫持 XMLHttpRequest。AliyunCaptcha SDK 依赖 JSDOM 原生 XHR 的完整实现，
+      // 全局替换会导致 SDK 崩溃。只在 xhrSend/xhrSendStream 里用 NodeXHR 发 z.ai 请求。
       window.matchMedia = () => ({ matches:false, media:'', onchange:null, addListener(){}, removeListener(){}, addEventListener(){}, removeEventListener(){}, dispatchEvent(){return false;} });
       Object.defineProperty(window.navigator, 'webdriver', { get: () => false });
       Object.defineProperty(window.navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
@@ -255,7 +253,7 @@ async function initPool() {
 // 用 window 的 XHR 发请求，返回 {status, body, headers}
 function xhrSend(window, method, url, headers, body, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
-    const xhr = new window.XMLHttpRequest();
+    const xhr = new NodeXHR();
     xhr.open(method, url);
     if (headers) for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
     xhr.onload = () => {
@@ -276,7 +274,7 @@ function xhrSend(window, method, url, headers, body, timeoutMs = 60000) {
 // 适合上游 SSE：边收边 pipe 给 HTTP 响应，降低 time-to-first-token。
 function xhrSendStream(window, method, url, headers, body, { onChunk, onHeaders, timeoutMs = 300000 } = {}) {
   return new Promise((resolve, reject) => {
-    const xhr = new window.XMLHttpRequest();
+    const xhr = new NodeXHR();
     xhr.open(method, url);
     if (headers) for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
     let sent = 0;            // 已 flush 的 responseText 长度
