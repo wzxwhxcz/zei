@@ -20,6 +20,9 @@
 
 const { JSDOM, VirtualConsole, CookieJar } = require('jsdom');
 const crypto = require('crypto');
+const https = require('https');
+const http = require('http');
+const { URL } = require('url');
 
 // ─── 配置 ───
 const SCENE = process.env.CAPTCHA_SCENE || 'didk33e0';
@@ -67,6 +70,82 @@ function nowVars() {
   };
 }
 
+// ─── NodeXHR：基于 Node 原生 https/http 的 XMLHttpRequest 实现 ───
+// 劫持 JSDOM 的 window.XMLHttpRequest，绕过 JSDOM XHR 的 CORS 预检/TLS 问题。
+// 在 HF Spaces 上，JSDOM 默认 XHR 发请求被阿里云 CDN 返回 405（可能是 CORS 预检
+// 触发 OPTIONS 或 TLS 指纹问题）。用 Node 原生 https 直接发，不走 JSDOM 的 XHR。
+class NodeXHR {
+  constructor() {
+    this.readyState = 0;
+    this.status = 0;
+    this.statusText = '';
+    this.responseText = '';
+    this.responseType = '';
+    this.timeout = 0;
+    this._method = 'GET';
+    this._url = '';
+    this._headers = {};
+    this._body = null;
+    this._resHeaders = {};
+    this.onreadystatechange = null;
+    this.onprogress = null;
+    this.onload = null;
+    this.onerror = null;
+    this.ontimeout = null;
+    this._req = null;
+  }
+  open(method, url) { this._method = method; this._url = url; this._fire(1); }
+  setRequestHeader(k, v) { this._headers[k] = v; }
+  _fire(s) { this.readyState = s; if (this.onreadystatechange) { try { this.onreadystatechange(); } catch {} } }
+  getAllResponseHeaders() {
+    return Object.entries(this._resHeaders).map(([k,v]) => `${k}: ${v}`).join('\r\n');
+  }
+  send(body) {
+    this._body = body;
+    const u = new URL(this._url);
+    const lib = u.protocol === 'https:' ? https : http;
+    const opts = {
+      method: this._method,
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: u.pathname + u.search,
+      headers: { ...this._headers },
+    };
+    // 禁用 keep-alive 连接池复用（避免跨请求串扰）
+    opts.headers['Connection'] = 'keep-alive';
+    this._req = lib.request(opts, (res) => {
+      this.status = res.statusCode || 0;
+      this.statusText = res.statusMessage || '';
+      this._resHeaders = res.headers || {};
+      this._fire(2); // HEADERS_RECEIVED
+      this._fire(3); // LOADING
+      let chunks = [];
+      res.on('data', (chunk) => {
+        chunks.push(chunk);
+        // 实时更新 responseText + 触发 onprogress/readystatechange
+        this.responseText += chunk.toString('utf8');
+        if (this.onprogress) { try { this.onprogress(); } catch {} }
+        this._fire(3);
+      });
+      res.on('end', () => {
+        this.responseText = Buffer.concat(chunks).toString('utf8');
+        this._fire(4); // DONE
+        if (this.onload) { try { this.onload(); } catch {} }
+      });
+    });
+    this._req.on('error', (e) => {
+      if (this.onerror) { try { this.onerror(e); } catch {} }
+    });
+    if (this.timeout > 0) this._req.setTimeout(this.timeout, () => {
+      this._req.destroy();
+      if (this.ontimeout) { try { this.ontimeout(); } catch {} }
+    });
+    if (body) this._req.write(body);
+    this._req.end();
+  }
+  abort() { if (this._req) this._req.destroy(); }
+}
+
 // ─── JSDOM window 工厂 ───
 function createWindow() {
   const vc = new VirtualConsole();
@@ -87,6 +166,10 @@ function createWindow() {
     cookieJar: new CookieJar(),
     userAgent: UA,
     beforeParse(window) {
+      // ★ 关键：劫持 XMLHttpRequest，用 Node 原生 https 替代 JSDOM 的 XHR。
+      // JSDOM 默认 XHR 在 HF Spaces 上发请求被阿里云 CDN 返回 405（CORS/TLS 问题）。
+      // Node 原生 https 不触发 CORS 预检，直接发 POST，绕过此问题。
+      window.XMLHttpRequest = NodeXHR;
       window.matchMedia = () => ({ matches:false, media:'', onchange:null, addListener(){}, removeListener(){}, addEventListener(){}, removeEventListener(){}, dispatchEvent(){return false;} });
       Object.defineProperty(window.navigator, 'webdriver', { get: () => false });
       Object.defineProperty(window.navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
