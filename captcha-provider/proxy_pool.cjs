@@ -26,22 +26,45 @@ const MAX_FAILS = 2;                   // 失败 2 次淘汰
 
 function buildListUrl() {
   if (process.env.PROXY_LIST_URL) return process.env.PROXY_LIST_URL;
-  // 默认 http 协议（兼容性最好，https-proxy-agent 无 peer dep 问题）；
-  // SOCKS5 需要 socks-proxy-agent，某些环境可能装不上（设 PROXY_PROTOCOL=socks5 启用）。
-  const proto = process.env.PROXY_PROTOCOL || 'http';
-  const country = process.env.PROXY_COUNTRY || 'cn,hk';
-  const timeout = process.env.PROXY_TIMEOUT || '5000';
-  const anonymity = process.env.PROXY_ANONYMITY || 'elite';
-  const params = new URLSearchParams({
-    request: 'display_proxies',
-    protocol: proto,
-    country: country,
-    timeout: timeout,
-    anonymity: anonymity,
-    proxy_format: 'protocolipport',
-    format: 'text',
+  return ''; // 默认不使用 ProxyScrape，改由 PROXY_POOL_API 从 go_proxy_pool 取
+}
+
+// fetchFromProxyPoolAPI 从 go_proxy_pool 等 API 取代理（JSON 格式）。
+// 设了 PROXY_POOL_API 时优先用这个（质量比 ProxyScrape 高，有存活验证）。
+async function fetchFromProxyPoolAPI() {
+  const apiUrl = process.env.PROXY_POOL_API || '';
+  if (!apiUrl) return [];
+  return new Promise((resolve) => {
+    const lib = apiUrl.startsWith('https:') ? https : http;
+    const req = lib.get(apiUrl, { timeout: 15000 }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          // go_proxy_pool 格式：count=1 返回单个对象，count>1 返回数组
+          const arr = Array.isArray(parsed) ? parsed : [parsed];
+          const urls = arr
+            .filter(p => p.Ip && p.Port)
+            .map(p => {
+              // HTTPS/SOCKET5 类型用对应协议前缀
+              const proto = (p.Type || 'HTTP').includes('SOCKET') ? 'socks5' : 'http';
+              return `${proto}://${p.Ip}:${p.Port}`;
+            });
+          console.log(`[proxy-pool] 从代理池API获取 ${urls.length} 个代理`);
+          resolve(urls);
+        } catch (e) {
+          console.error(`[proxy-pool] 代理池API解析失败: ${e.message}`);
+          resolve([]);
+        }
+      });
+    });
+    req.on('error', (e) => {
+      console.error(`[proxy-pool] 代理池API请求失败: ${e.message}`);
+      resolve([]);
+    });
+    req.on('timeout', () => { req.destroy(); resolve([]); });
   });
-  return `https://api.proxyscrape.com/v4/free-proxy-list/get?${params}`;
 }
 
 // 检测 socks-proxy-agent 是否可用（某些环境 npm install 会因 peer dep 冲突漏装）
@@ -133,13 +156,22 @@ async function start() {
     if (agent) agents = [{ url: fixed, agent, fails: 0, lastUsed: 0 }];
     return;
   }
+
+  // 取代理的统一函数：优先 PROXY_POOL_API（go_proxy_pool），回退 ProxyScrape
+  const fetchProxies = async () => {
+    if (process.env.PROXY_POOL_API) {
+      return await fetchFromProxyPoolAPI();
+    }
+    return await fetchList();
+  };
+
   // 池模式：抓取 + 定时刷新
-  const list = await fetchList();
+  const list = await fetchProxies();
   refreshAgents(list);
   setInterval(async () => {
     if (agents.filter(a => a.fails < MAX_FAILS).length < 5) {
       // 活着的太少，重新抓
-      const l = await fetchList();
+      const l = await fetchProxies();
       refreshAgents(l);
       badSet.clear(); // 给被淘汰的第二次机会
       lastFetch = Date.now();
