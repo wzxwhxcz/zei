@@ -451,4 +451,41 @@ async function handleChat(req, callbacks = {}) {
   }
 }
 
-module.exports = { handleChat, initPool, createWindow };
+// 方案二：只拿 captcha token + chatId（Go tls-client 自己发 chat）。
+// 适用于 Node 直连 z.ai 被风控的场景：JSDOM 拿 captcha，Go tls-client 发 chat。
+// 返回 { ok, captcha_verify_param, chat_id, user_msg_id }
+async function getCaptchaAndChatId(req) {
+  const { token } = req;
+  if (!token) throw new Error('missing token');
+
+  const window = await acquireWindow();
+  try {
+    // 1) 拿 captcha
+    const captchaParam = await new Promise((resolve, reject) => {
+      const settle = (fn) => { try { fn(); } catch (e) { reject(e); } };
+      window.initAliyunCaptcha({
+        SceneId: SCENE, mode: MODE, region: REGION, prefix: PREFIX,
+        element: '#cap', button: '#btn', captchaLogoImg: '', showErrorTip: false,
+        getInstance: (inst) => settle(() => (inst.startTracelessVerification || inst.verify || inst.show).call(inst)),
+        success: (param) => resolve(param),
+        fail: (r) => reject(new Error('captcha fail: ' + JSON.stringify(r))),
+        onError: (e) => reject(new Error('captcha onError: ' + JSON.stringify(e))),
+      });
+      setTimeout(() => reject(new Error('captcha timeout')), 35000);
+    });
+
+    // 2) 建 chatId（用 NodeXHR，只是 chats/new 不走风控）
+    const newChat = await xhrSend(window, 'POST', 'https://chat.z.ai/api/v1/chats/new',
+      { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Accept-Language': ACCEPT_LANGUAGE, 'X-FE-Version': FE_VERSION },
+      JSON.stringify({ chat: { title: 'hi' } }), 15000);
+    let chatId = crypto.randomUUID();
+    try { const p = JSON.parse(newChat.body); chatId = p.id || (p.data && p.data.id) || chatId; } catch {}
+
+    const userMsgId = crypto.randomUUID();
+    return { ok: true, captcha_verify_param: captchaParam, chat_id: chatId, user_msg_id: userMsgId };
+  } finally {
+    // window 用完即弃
+  }
+}
+
+module.exports = { handleChat, initPool, createWindow, getCaptchaAndChatId };

@@ -14,6 +14,12 @@ import (
 // osGetenv = os.Getenv（包一层方便测试 mock）
 var osGetenv = os.Getenv
 
+// osGetenvBool 读 env 并判断 truthy。
+func osGetenvBool(key string) bool {
+	v := os.Getenv(key)
+	return v == "true" || v == "1" || v == "yes"
+}
+
 // DefaultBrowserProfile 与 tls-client 内置 Chrome_133 一致（ClientHello、HTTP/2 SETTINGS/优先级/伪头序等），便于 JA3/JA4 与 HTTP/2 指纹对齐。
 var DefaultBrowserProfile = profiles.Chrome_133
 

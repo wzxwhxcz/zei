@@ -215,7 +215,26 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  sendJson(res, 404, { error: 'Use GET /token, GET /health, or POST /v1/chat' });
+  // ─── 方案二：只拿 captcha token + chatId（Go tls-client 自己发 chat）───
+  // 适用于 Node 直连 z.ai 被风控（HF 数据中心 IP）的场景：
+  // JSDOM 拿 captcha（需要 JSDOM 环境），Go tls-client（Chrome 指纹）发 chat（能过 CDN）。
+  if (req.method === 'POST' && req.url === '/v1/captcha-token') {
+    let bodyBuf = '';
+    for await (const chunk of req) bodyBuf += chunk;
+    let payload;
+    try { payload = JSON.parse(bodyBuf); } catch (e) {
+      return sendJson(res, 400, { ok: false, error: 'invalid json: ' + e.message });
+    }
+    try {
+      const result = await chatProxy.getCaptchaAndChatId(payload);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      console.error(`[chat-proxy] /v1_captcha-token error: ${err.message}`);
+      return sendJson(res, 502, { ok: false, error: err.message });
+    }
+  }
+
+  sendJson(res, 404, { error: 'Use GET /token, GET /health, POST /v1/chat, or POST /v1/captcha-token' });
 });
 
 // ─── Start ───

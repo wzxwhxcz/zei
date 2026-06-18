@@ -325,6 +325,151 @@ func makeFullProxyRequest(token, upstreamModel string, enableThinking, autoWebSe
 	return out, nil
 }
 
+// makeHybridRequest 混合模式：provider（JSDOM）只拿 captcha+chatId，
+// Go tls-client（Chrome 指纹）发 chat。适用于 Node 直连被 CDN 风控（405）的环境。
+func makeHybridRequest(token, upstreamModel string, enableThinking, autoWebSearch bool, reasoningEffort, signaturePrompt string, upstreamMessages []map[string]interface{}, filesData []map[string]interface{}) (*fhttp.Response, error) {
+	// 1) 从 provider 拿 captcha + chatId
+	proxyURL := strings.TrimRight(Cfg.CaptchaFullProxyURL, "/") + "/v1/captcha-token"
+	reqPayload := map[string]interface{}{"token": token}
+	reqBytes, _ := json.Marshal(reqPayload)
+
+	hreq, err := http.NewRequest("POST", proxyURL, bytes.NewReader(reqBytes))
+	if err != nil {
+		return nil, err
+	}
+	hreq.Header.Set("Content-Type", "application/json")
+	hreq.Header.Set("Accept-Encoding", "identity")
+	hclient := &http.Client{Timeout: 60 * time.Second}
+	hresp, err := hclient.Do(hreq)
+	if err != nil {
+		return nil, fmt.Errorf("hybrid: get captcha from provider: %w", err)
+	}
+	defer hresp.Body.Close()
+	if hresp.StatusCode != 200 {
+		body, _ := io.ReadAll(hresp.Body)
+		return nil, fmt.Errorf("hybrid: provider captcha-token status %d: %s", hresp.StatusCode, string(body)[:min(200, len(body))])
+	}
+	var capResp struct {
+		OK                  bool   `json:"ok"`
+		CaptchaVerifyParam  string `json:"captcha_verify_param"`
+		ChatID              string `json:"chat_id"`
+		UserMsgID           string `json:"user_msg_id"`
+		Error               string `json:"error"`
+	}
+	if err := json.NewDecoder(hresp.Body).Decode(&capResp); err != nil {
+		return nil, fmt.Errorf("hybrid: decode captcha response: %w", err)
+	}
+	if !capResp.OK || capResp.CaptchaVerifyParam == "" {
+		return nil, fmt.Errorf("hybrid: no captcha: %s", capResp.Error)
+	}
+	LogDebug("[Hybrid] Got captcha + chatId=%s from provider", capResp.ChatID)
+
+	// 2) 用 Go tls-client（Chrome 指纹）发 completions
+	payload, err := DecodeJWTPayload(token)
+	if err != nil || payload == nil {
+		return nil, fmt.Errorf("invalid token")
+	}
+	userID := payload.ID
+	chatID := capResp.ChatID
+	if chatID == "" {
+		chatID = uuid.New().String()
+	}
+	userMsgID := capResp.UserMsgID
+	if userMsgID == "" {
+		userMsgID = uuid.New().String()
+	}
+	ts := time.Now().UnixMilli()
+	requestID := uuid.New().String()
+	sig := GenerateSignature(userID, requestID, signaturePrompt, ts)
+	effort := ""
+	if enableThinking && !autoWebSearch {
+		effort = mapEffort(reasoningEffort)
+	}
+
+	completionsURL := Cfg.APIEndpoint + "?" + buildBrowserFingerprintQuery(ts, requestID, userID, token, chatID)
+
+	// 构造 variables
+	now := time.Now()
+	sh := now.UTC().Add(8 * 3600 * time.Second)
+	weekdays := []string{"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"}
+	curDT := fmt.Sprintf("%d-%02d-%02d %02d:%02d:%02d", sh.Year(), sh.Month(), sh.Day(), sh.Hour(), sh.Minute(), sh.Second())
+
+	body := map[string]interface{}{
+		"stream":           true,
+		"model":            upstreamModel,
+		"messages":         upstreamMessages,
+		"signature_prompt": signaturePrompt,
+		"params":           map[string]interface{}{},
+		"extra":            map[string]interface{}{},
+		"features": map[string]interface{}{
+			"image_generation":    false,
+			"web_search":          false,
+			"auto_web_search":     autoWebSearch,
+			"preview_mode":        enableThinking,
+			"flags":               []string{},
+			"vlm_tools_enable":    false,
+			"vlm_web_search_enable": false,
+			"vlm_website_mode":    false,
+			"enable_thinking":     enableThinking,
+		},
+		"variables": map[string]string{
+			"{{USER_NAME}}": "Anonymous", "{{USER_LOCATION}}": "Unknown",
+			"{{CURRENT_DATETIME}}": curDT, "{{CURRENT_DATE}}": curDT[:10],
+			"{{CURRENT_TIME}}": curDT[11:], "{{CURRENT_WEEKDAY}}": weekdays[sh.Weekday()],
+			"{{CURRENT_TIMEZONE}}": "Asia/Shanghai", "{{USER_LANGUAGE}}": "zh-CN",
+		},
+		"chat_id":                     chatID,
+		"id":                          uuid.New().String(),
+		"current_user_message_id":     userMsgID,
+		"current_user_message_parent_id": nil,
+		"background_tasks":            map[string]bool{"title_generation": true, "tags_generation": true},
+		"captcha_verify_param":        capResp.CaptchaVerifyParam,
+	}
+	if effort != "" {
+		body["features"].(map[string]interface{})["reasoning_effort"] = effort
+	}
+	if len(filesData) > 0 {
+		body["files"] = filesData
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	freq, err := fhttp.NewRequest("POST", completionsURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	randomIP := generateRandomIP()
+	freq.Header.Set("Authorization", "Bearer "+token)
+	freq.Header.Set("X-FE-Version", GetFeVersion())
+	freq.Header.Set("X-Signature", sig)
+	freq.Header.Set("Content-Type", "application/json")
+	freq.Header.Set("Accept-Language", "zh-CN")
+	freq.Header.Set("X-Region", "overseas")
+	freq.Header.Set("Connection", "keep-alive")
+	freq.Header.Set("Origin", "https://chat.z.ai")
+	freq.Header.Set("Referer", fmt.Sprintf("https://chat.z.ai/c/%s", chatID))
+	ApplyBrowserFingerprintHeaders(freq.Header)
+	freq.Header.Set("X-Forwarded-For", randomIP)
+	freq.Header.Set("X-Real-IP", randomIP)
+
+	LogDebug("[Hybrid] Sending completions via tls-client, model=%s, XFF=%s", upstreamModel, randomIP)
+	client, err := TLSHTTPClient(300 * time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(freq)
+}
+
+// mapEffort 映射 reasoning_effort（与 chat_proxy.cjs 的 mapEffort 一致）。
+func mapEffort(v string) string {
+	if v == "" {
+		return ""
+	}
+	lv := strings.ToLower(v)
+	if lv == "max" || lv == "high" {
+		return "max"
+	}
+	return "high"
+}
 func makeUpstreamRequest(token string, messages []Message, model string, imageURLs, videoURLs []string, hasTools bool, tools []Tool, reasoningEffort string) (*fhttp.Response, string, error) {
 	payload, err := DecodeJWTPayload(token)
 	if err != nil || payload == nil {
@@ -445,6 +590,16 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	// 设了 CaptchaFullProxyURL 就走这条，彻底绕开跨进程环境不一致导致的 F019 verify_failed。
 	// provider 返回上游 SSE 原文，下游 handleStream/NonStream 零改动复用。
 	if Cfg.CaptchaFullProxyURL != "" {
+		// HYBRID_MODE=1：JSDOM 只拿 captcha，Go tls-client（Chrome 指纹）发 chat。
+		// 适用于 Node 直连被 CDN 风控（HF 数据中心 IP → 405）。
+		if osGetenvBool("HYBRID_MODE") {
+			LogDebug("[Hybrid] captcha from provider, chat via tls-client")
+			resp, hErr := makeHybridRequest(token, targetModel, enableThinking, autoWebSearch, reasoningEffort, latestUserContent, upstreamMessages, filesData)
+			if hErr != nil {
+				return nil, targetModel, hErr
+			}
+			return resp, targetModel, nil
+		}
 		LogDebug("[FullProxy] routing %s via %s", targetModel, Cfg.CaptchaFullProxyURL)
 		resp, fpErr := makeFullProxyRequest(token, targetModel, enableThinking, autoWebSearch, reasoningEffort, latestUserContent, upstreamMessages, filesData)
 		if fpErr != nil {
