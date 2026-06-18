@@ -107,12 +107,22 @@ class NodeXHR {
   }
   send(body) {
     this._body = body;
-    // UPSTREAM_BASE_URL（CF Worker 反代）：把 chat.z.ai 替换成 CF Worker 域名
-    // CF 的 IP 不被阿里云 CDN 风控，解决 HF 数据中心 IP 405 问题
+    // UPSTREAM_BASE_URL（CF Worker / Supabase 反代）：把 chat.z.ai 的路径编码到 query 参数 _path
+    // CF Worker：直接替换域名即可（无 nginx 限制）
+    // Supabase：nginx 不允许 POST 带子路径，所以把路径编码到 ?_path= 里，
+    //           POST 只打到函数根路径，反代从 _path 读取真实路径转发
     let sendUrl = this._url;
-    const upstreamBase = process.env.UPSTREAM_BASE_URL || '';
+    const upstreamBase = (process.env.UPSTREAM_BASE_URL || '').replace(/\/$/, '');
     if (upstreamBase && sendUrl.includes('chat.z.ai')) {
-      sendUrl = sendUrl.replace('https://chat.z.ai', upstreamBase.replace(/\/$/, ''));
+      const origUrl = new URL(sendUrl);
+      const realPath = origUrl.pathname + origUrl.search;
+      if (upstreamBase.includes('supabase.co') || upstreamBase.includes('deno.dev')) {
+        // Supabase / Deno Deploy：路径编码到 query，POST 打到根路径
+        sendUrl = upstreamBase + '/?_path=' + encodeURIComponent(realPath);
+      } else {
+        // CF Worker：直接替换域名
+        sendUrl = upstreamBase + realPath;
+      }
     }
     const u = new URL(sendUrl);
     const lib = u.protocol === 'https:' ? https : http;
