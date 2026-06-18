@@ -124,6 +124,7 @@ const server = http.createServer(async (req, res) => {
       pool: tokenPool.length,
       stats,
       lastError,
+      proxy: (() => { try { return require('./proxy_pool.cjs').stats(); } catch { return null; } })(),
     });
   }
 
@@ -235,6 +236,10 @@ server.listen(PORT, HOST, async () => {
   }
   // 暴露给 /token 路由用
   server._ensureTokenPool = ensureTokenPool;
+
+  // 启动代理池（ProxyScrape 免费代理，或 HTTPS_PROXY 手动指定）
+  const proxyPool = require('./proxy_pool.cjs');
+  proxyPool.start().catch(() => {});
 
   // 预热 JSDOM 全链路 chat 窗口池（非阻塞，后台补）
   chatProxy.initPool().then(() => {

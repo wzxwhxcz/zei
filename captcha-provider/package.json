@@ -10,6 +10,7 @@
     "cloakbrowser": "^0.3.30",
     "https-proxy-agent": "^7.0.6",
     "jsdom": "^29.1.1",
-    "playwright-core": "^1.49.1"
+    "playwright-core": "^1.49.1",
+    "socks-proxy-agent": "^8.0.5"
   }
 }
