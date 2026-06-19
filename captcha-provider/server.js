@@ -161,11 +161,11 @@ const server = http.createServer(async (req, res) => {
 
   // ─── 全链路 chat 代理：同一 JSDOM window 内 captcha → chats/new → completions ───
   if (req.method === 'POST' && req.url === '/v1/chat') {
-    let bodyBuf = '';
-    for await (const chunk of req) bodyBuf += chunk;
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
     let payload;
     try {
-      payload = JSON.parse(bodyBuf);
+      payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     } catch (e) {
       return sendJson(res, 400, { ok: false, error: 'invalid json: ' + e.message });
     }
@@ -219,10 +219,10 @@ const server = http.createServer(async (req, res) => {
   // 适用于 Node 直连 z.ai 被风控（HF 数据中心 IP）的场景：
   // JSDOM 拿 captcha（需要 JSDOM 环境），Go tls-client（Chrome 指纹）发 chat（能过 CDN）。
   if (req.method === 'POST' && req.url === '/v1/captcha-token') {
-    let bodyBuf = '';
-    for await (const chunk of req) bodyBuf += chunk;
+    const capChunks = [];
+    for await (const chunk of req) capChunks.push(chunk);
     let payload;
-    try { payload = JSON.parse(bodyBuf); } catch (e) {
+    try { payload = JSON.parse(Buffer.concat(capChunks).toString('utf8')); } catch (e) {
       return sendJson(res, 400, { ok: false, error: 'invalid json: ' + e.message });
     }
     try {
@@ -276,3 +276,19 @@ process.on('SIGINT', async () => {
 process.on('SIGTERM', async () => {
   process.exit(0);
 });
+
+// 防崩溃：未捕获异常不退出进程（避免 JSDOM 偶发错误搞挂整个 provider）
+process.on('uncaughtException', (err) => {
+  console.error('[provider] uncaughtException（已拦截，不退出）:', err.message);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[provider] unhandledRejection（已拦截，不退出）:', err);
+});
+
+// 内存监控：每 60s 检查一次，超 1.5GB 警告（HF 免费版 16GB，但 JSDOM 窗口多了会爆）
+setInterval(() => {
+  const mem = process.memoryUsage();
+  if (mem.rss > 1500 * 1024 * 1024) {
+    console.warn(`[provider] 内存高: rss=${Math.round(mem.rss/1024/1024)}MB, 建议降低 WINDOW_POOL_SIZE`);
+  }
+}, 60000);
