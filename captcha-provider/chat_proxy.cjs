@@ -189,7 +189,7 @@ class NodeXHR {
         }
       });
 
-      if (this._body) this._req.write(this._body);
+      if (this._body) this._req.write(Buffer.from(this._body, 'utf8'));
       this._req.end();
     };
 
