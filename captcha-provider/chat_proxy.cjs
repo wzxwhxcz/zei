@@ -436,10 +436,29 @@ async function handleChat(req, callbacks = {}) {
       browser_name: 'Chrome', os_name: 'Windows', signature_timestamp: String(ts),
     }).toString();
 
+    // z.ai 后端不读 messages 数组里的历史（只看 chat_id 的服务端历史）。
+    // 我们每次新建 chat_id，所以要把历史合并到最后一条 user message 里。
+    let upstreamMessages = messages;
+    if (messages && messages.length > 1) {
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg.role === 'user') {
+        // 把前面的对话作为上下文拼到最后一条 user message 里
+        const history = messages.slice(0, -1).map(m => {
+          const role = m.role === 'assistant' ? 'AI' : (m.role === 'system' ? '系统' : '用户');
+          return `${role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`;
+        }).join('\n');
+        const lastContent = typeof lastMsg.content === 'string' ? lastMsg.content : JSON.stringify(lastMsg.content);
+        upstreamMessages = [{
+          role: 'user',
+          content: `以下是之前的对话历史：\n${history}\n\n用户最新消息：${lastContent}`,
+        }];
+      }
+    }
+
     const body = {
       stream: true,
       model: upstream_model,
-      messages,
+      messages: upstreamMessages,
       signature_prompt: signature_prompt || '',
       params: {}, extra: {},
       features: {
