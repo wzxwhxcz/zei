@@ -618,6 +618,7 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 					"error":           ctxFile.Error,
 					"itemId":          ctxFile.ItemID,
 					"media":           ctxFile.Media,
+					"uploadedAt":      ctxFile.UploadedAt,
 					"ref_user_msg_id": userMsgID,
 				})
 				contextFileUploaded = true

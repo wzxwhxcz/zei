@@ -53,16 +53,17 @@ type FileMeta struct {
 
 // UpstreamFile 上游请求的文件格式
 type UpstreamFile struct {
-	Type   string             `json:"type"`
-	File   FileUploadResponse `json:"file"`
-	ID     string             `json:"id"`
-	URL    string             `json:"url"`
-	Name   string             `json:"name"`
-	Status string             `json:"status"`
-	Size   int64              `json:"size"`
-	Error  string             `json:"error"`
-	ItemID string             `json:"itemId"`
-	Media  string             `json:"media"`
+	Type       string             `json:"type"`
+	File       FileUploadResponse `json:"file"`
+	ID         string             `json:"id"`
+	URL        string             `json:"url"`
+	Name       string             `json:"name"`
+	Status     string             `json:"status"`
+	Size       int64              `json:"size"`
+	Error      string             `json:"error"`
+	ItemID     string             `json:"itemId"`
+	Media      string             `json:"media"`
+	UploadedAt int64              `json:"uploadedAt,omitempty"` // 真实请求里文本附件带此字段（毫秒时间戳），媒体附件不带
 }
 
 // mimeExtMap MIME 类型到扩展名映射
@@ -491,15 +492,18 @@ func UploadMediaFiles(token string, imageURLs, videoURLs []string) ([]*UpstreamF
 }
 
 // buildHistoryTranscript 把多轮对话历史拼成一段纯文本，
-// 作为上下文文件的正文。z.ai 后端不读 messages 数组里的历史，所以我们把
-// 历史序列化成 .txt 让模型读取。格式参考 CJackHwang/ds2api 的 DS2API_HISTORY.txt。
+// 作为上下文文件 GLM_CHAT_HISTORY.txt 的正文。z.ai 后端不读 messages 数组里的历史，
+// 所以我们把历史序列化成 .txt 附到请求 files 数组里让模型读取（实测 z.ai 会读）。
+// 思路参考 CJackHwang/ds2api，但用我们自己的命名与格式。
 // lastUserIdx 之后的消息（即最新的 user 消息）不算历史，由请求主 messages 携带。
 func buildHistoryTranscript(messages []Message, lastUserIdx int) string {
 	if lastUserIdx <= 0 {
 		return ""
 	}
 	var sb strings.Builder
-	sb.WriteString("以下是本次对话之前的聊天记录，供你参考上下文：\n\n")
+	// 自己的标题：明确告诉模型这份文件是历史上下文
+	sb.WriteString("# GLM_CHAT_HISTORY.txt\n")
+	sb.WriteString("下面是本次对话之前的完整聊天记录，作为上下文供你参考。请结合用户最新消息一起理解。\n\n")
 	for i := 0; i < lastUserIdx; i++ {
 		m := messages[i]
 		var role string
@@ -534,7 +538,7 @@ func UploadContextFile(token, transcript string) (*UpstreamFile, error) {
 		LogDebug("[ContextFile] transcript %d bytes > limit %d, fallback to merge", len(transcript), Cfg.ContextFileMaxBytes)
 		return nil, nil
 	}
-	filename := fmt.Sprintf("chat_history_%d.txt", time.Now().UnixMilli())
+	filename := "GLM_CHAT_HISTORY.txt"
 	LogDebug("[ContextFile] Uploading history transcript: %d bytes, filename=%s", len(transcript), filename)
 	uploadResp, err := uploadToZAI(token, []byte(transcript), filename, "text/plain")
 	if err != nil {
@@ -542,15 +546,18 @@ func UploadContextFile(token, transcript string) (*UpstreamFile, error) {
 		return nil, nil // 回退，不把上传错误往上传
 	}
 	LogDebug("[ContextFile] upload success: id=%s", uploadResp.ID)
+	// url 格式按真实 z.ai web 请求：/api/v1/files/<id>（不带 /content 后缀）。
+	// uploadedAt 用毫秒时间戳，与真实请求一致。
 	return &UpstreamFile{
-		Type:   "file",
-		File:   *uploadResp,
-		ID:     uploadResp.ID,
-		URL:    "/api/v1/files/" + uploadResp.ID + "/content",
-		Name:   uploadResp.Filename,
-		Status: "uploaded",
-		Size:   uploadResp.Meta.Size,
-		ItemID: uuid.New().String(),
-		Media:  "file",
+		Type:       "file",
+		File:       *uploadResp,
+		ID:         uploadResp.ID,
+		URL:        "/api/v1/files/" + uploadResp.ID,
+		Name:       uploadResp.Filename,
+		Status:     "uploaded",
+		Size:       uploadResp.Meta.Size,
+		ItemID:     uuid.New().String(),
+		Media:      "file",
+		UploadedAt: time.Now().UnixMilli(),
 	}, nil
 }
