@@ -45,6 +45,14 @@ type Config struct {
 	ScanLimit               int
 	LogLevel                string
 
+	// 多轮上下文处理。z.ai 后端不读 messages 数组里的历史（只看 chat_id 的服务端历史），
+	// 而我们每次新建 chat_id，所以多轮上下文需要自己补。两种策略：
+	//   1) 优先把完整对话历史上传成 .txt 文件（z.ai 文件接口），附到请求 files 数组里让模型读取；
+	//   2) 上传失败/超阈值时，回退到「把历史合并到最后一条 user message」（chat_proxy.cjs 里的旧逻辑）。
+	// 思路参考 CJackHwang/ds2api 的 current_input_file（DS2API_HISTORY.txt）。
+	ContextFileUpload  bool // CONTEXT_FILE_UPLOAD，默认开启
+	ContextFileMaxBytes int  // CONTEXT_FILE_MAX_BYTES，历史文件上限，超过则回退合并
+
 	// 匿名 token 池（无 TokenManager / BACKUP_TOKEN 时启用；已配置上游 token 时不使用池）
 	AnonymousPoolSize               int
 	AnonymousTokenTTLSeconds        int
@@ -147,6 +155,9 @@ func LoadConfig() {
 		SkipAuthToken:           getEnvBool("SKIP_AUTH_TOKEN", false),
 		ScanLimit:               getEnvInt("SCAN_LIMIT", 200000),
 		LogLevel:                getEnvString("LOG_LEVEL", "info"),
+
+		ContextFileUpload:   getEnvBool("CONTEXT_FILE_UPLOAD", true),
+		ContextFileMaxBytes: getEnvInt("CONTEXT_FILE_MAX_BYTES", 200000), // ~200KB 上限，超了回退合并
 
 		AnonymousPoolSize:               getEnvInt("ANONYMOUS_POOL_SIZE", 4),
 		AnonymousTokenTTLSeconds:        getEnvInt("ANONYMOUS_TOKEN_TTL_SECONDS", 1200),

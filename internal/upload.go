@@ -489,3 +489,68 @@ func UploadMediaFiles(token string, imageURLs, videoURLs []string) ([]*UpstreamF
 	videos, _ := UploadVideos(token, videoURLs)
 	return images, videos, nil
 }
+
+// buildHistoryTranscript 把多轮对话历史拼成一段纯文本，
+// 作为上下文文件的正文。z.ai 后端不读 messages 数组里的历史，所以我们把
+// 历史序列化成 .txt 让模型读取。格式参考 CJackHwang/ds2api 的 DS2API_HISTORY.txt。
+// lastUserIdx 之后的消息（即最新的 user 消息）不算历史，由请求主 messages 携带。
+func buildHistoryTranscript(messages []Message, lastUserIdx int) string {
+	if lastUserIdx <= 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("以下是本次对话之前的聊天记录，供你参考上下文：\n\n")
+	for i := 0; i < lastUserIdx; i++ {
+		m := messages[i]
+		var role string
+		switch m.Role {
+		case "assistant":
+			role = "AI"
+		case "system":
+			role = "系统"
+		case "tool":
+			role = "工具返回"
+		default:
+			role = "用户"
+		}
+		content, _ := m.ParseContent()
+		if content == "" {
+			continue
+		}
+		sb.WriteString(role + "：" + content + "\n\n")
+	}
+	return sb.String()
+}
+
+// UploadContextFile 把对话历史上传成 z.ai 文件，返回可附到请求 files 数组的结构。
+// 失败（上传失败/正文为空/超阈值）时返回 (nil, nil)，调用方据此回退到「合并到最后一条消息」。
+// mediaType 用 "file" 表示文本附件（媒体用 "image"/"video"）。
+func UploadContextFile(token, transcript string) (*UpstreamFile, error) {
+	transcript = strings.TrimSpace(transcript)
+	if transcript == "" {
+		return nil, nil
+	}
+	if Cfg != nil && Cfg.ContextFileMaxBytes > 0 && len(transcript) > Cfg.ContextFileMaxBytes {
+		LogDebug("[ContextFile] transcript %d bytes > limit %d, fallback to merge", len(transcript), Cfg.ContextFileMaxBytes)
+		return nil, nil
+	}
+	filename := fmt.Sprintf("chat_history_%d.txt", time.Now().UnixMilli())
+	LogDebug("[ContextFile] Uploading history transcript: %d bytes, filename=%s", len(transcript), filename)
+	uploadResp, err := uploadToZAI(token, []byte(transcript), filename, "text/plain")
+	if err != nil {
+		LogDebug("[ContextFile] upload failed: %v, fallback to merge", err)
+		return nil, nil // 回退，不把上传错误往上传
+	}
+	LogDebug("[ContextFile] upload success: id=%s", uploadResp.ID)
+	return &UpstreamFile{
+		Type:   "file",
+		File:   *uploadResp,
+		ID:     uploadResp.ID,
+		URL:    "/api/v1/files/" + uploadResp.ID + "/content",
+		Name:   uploadResp.Filename,
+		Status: "uploaded",
+		Size:   uploadResp.Meta.Size,
+		ItemID: uuid.New().String(),
+		Media:  "file",
+	}, nil
+}

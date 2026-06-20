@@ -259,7 +259,7 @@ func makeBridgeRequest(upstreamURL, token, signature string, bodyBytes []byte, r
 //
 // 入参：已映射的上游 model id + thinking/search 标志 + signature_prompt + upstreamMessages（含 fileID）+ filesData。
 // 返回：包成 *fhttp.Response 的 SSE 流（StatusCode 上游原值，通常 200）。
-func makeFullProxyRequest(token, upstreamModel string, enableThinking, autoWebSearch bool, reasoningEffort, signaturePrompt string, upstreamMessages []map[string]interface{}, filesData []map[string]interface{}) (*fhttp.Response, error) {
+func makeFullProxyRequest(token, upstreamModel string, enableThinking, autoWebSearch bool, reasoningEffort, signaturePrompt string, upstreamMessages []map[string]interface{}, filesData []map[string]interface{}, contextFileUploaded bool) (*fhttp.Response, error) {
 	proxyURL := strings.TrimRight(Cfg.CaptchaFullProxyURL, "/") + "/v1/chat"
 
 	payload := map[string]interface{}{
@@ -269,6 +269,9 @@ func makeFullProxyRequest(token, upstreamModel string, enableThinking, autoWebSe
 		"auto_web_search":  autoWebSearch,
 		"signature_prompt": signaturePrompt,
 		"messages":         upstreamMessages,
+		// context_file_uploaded：Go 侧已把对话历史上传成文件附到 files 数组。
+		// provider（chat_proxy.cjs）据此跳过自己的「合并到最后一条消息」逻辑，避免重复注入上下文。
+		"context_file_uploaded": contextFileUploaded,
 	}
 	if reasoningEffort != "" {
 		payload["reasoning_effort"] = reasoningEffort
@@ -586,6 +589,43 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 		upstreamMessages = append(upstreamMessages, msg.ToUpstreamMessage(urlToFileID))
 	}
 
+	// ── 多轮上下文：优先把对话历史上传成 .txt 文件（z.ai 文件接口）附到 files 数组。
+	// z.ai 后端不读 messages 数组里的历史（只看 chat_id 服务端历史，而每次新建 chat_id），
+	// 所以历史要么上传成文件，要么合并到最后一条 user message。
+	// 这里只做「上传文件」优先策略；上传失败时 contextFileUploaded=false，
+	// 全代理路径下由 chat_proxy.cjs 的合并逻辑兜底（fallback 保留）。
+	// 思路参考 CJackHwang/ds2api 的 current_input_file（DS2API_HISTORY.txt）。
+	contextFileUploaded := false
+	if Cfg.ContextFileUpload && len(messages) > 1 {
+		lastUserIdx := -1
+		for i := len(messages) - 1; i >= 0; i-- {
+			if messages[i].Role == "user" {
+				lastUserIdx = i
+				break
+			}
+		}
+		if lastUserIdx > 0 {
+			transcript := buildHistoryTranscript(messages, lastUserIdx)
+			if ctxFile, ferr := UploadContextFile(token, transcript); ferr == nil && ctxFile != nil {
+				filesData = append(filesData, map[string]interface{}{
+					"type":            ctxFile.Type,
+					"file":            ctxFile.File,
+					"id":              ctxFile.ID,
+					"url":             ctxFile.URL,
+					"name":            ctxFile.Name,
+					"status":          ctxFile.Status,
+					"size":            ctxFile.Size,
+					"error":           ctxFile.Error,
+					"itemId":          ctxFile.ItemID,
+					"media":           ctxFile.Media,
+					"ref_user_msg_id": userMsgID,
+				})
+				contextFileUploaded = true
+				LogDebug("[ContextFile] Attached history file id=%s to request", ctxFile.ID)
+			}
+		}
+	}
+
 	// ── 全链路 chat 代理：整个请求转给 captcha-provider（同 JSDOM 环境拿 captcha+建会话+发 completions）──
 	// 设了 CaptchaFullProxyURL 就走这条，彻底绕开跨进程环境不一致导致的 F019 verify_failed。
 	// provider 返回上游 SSE 原文，下游 handleStream/NonStream 零改动复用。
@@ -601,7 +641,7 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 			return resp, targetModel, nil
 		}
 		LogDebug("[FullProxy] routing %s via %s", targetModel, Cfg.CaptchaFullProxyURL)
-		resp, fpErr := makeFullProxyRequest(token, targetModel, enableThinking, autoWebSearch, reasoningEffort, latestUserContent, upstreamMessages, filesData)
+		resp, fpErr := makeFullProxyRequest(token, targetModel, enableThinking, autoWebSearch, reasoningEffort, latestUserContent, upstreamMessages, filesData, contextFileUploaded)
 		if fpErr != nil {
 			return nil, targetModel, fpErr
 		}

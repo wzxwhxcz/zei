@@ -370,7 +370,7 @@ function xhrSendStream(window, method, url, headers, body, { onChunk, onHeaders,
 //   callbacks.onChunk(sseString)          — 上游 SSE 增量，实时 pipe
 // 返回 { status, headers, full }（onload 时，full 为完整拼接）
 async function handleChat(req, callbacks = {}) {
-  const { token, upstream_model, enable_thinking, auto_web_search, reasoning_effort, signature_prompt, messages, files, extra_body } = req;
+  const { token, upstream_model, enable_thinking, auto_web_search, reasoning_effort, signature_prompt, messages, files, extra_body, context_file_uploaded } = req;
   if (!token) throw new Error('missing token');
   if (!upstream_model) throw new Error('missing upstream_model');
 
@@ -437,9 +437,13 @@ async function handleChat(req, callbacks = {}) {
     }).toString();
 
     // z.ai 后端不读 messages 数组里的历史（只看 chat_id 的服务端历史）。
-    // 我们每次新建 chat_id，所以要把历史合并到最后一条 user message 里。
+    // 我们每次新建 chat_id，所以多轮上下文需要自己补。两种策略（Go 侧决定）：
+    //   1) 优先：Go 已把完整历史上传成 .txt 文件附到 files 数组（context_file_uploaded=true），
+    //      此时无需再合并，直接透传 messages（历史 z.ai 会忽略，模型读文件即可）。
+    //   2) 兜底：上传失败/未启用时（context_file_uploaded=false），把历史合并到最后一条 user message。
     let upstreamMessages = messages;
-    if (messages && messages.length > 1) {
+    const ctxFileUploaded = !!req.context_file_uploaded;
+    if (!ctxFileUploaded && messages && messages.length > 1) {
       const lastMsg = messages[messages.length - 1];
       if (lastMsg.role === 'user') {
         // 把前面的对话作为上下文拼到最后一条 user message 里
