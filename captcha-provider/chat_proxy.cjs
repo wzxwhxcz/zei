@@ -500,7 +500,6 @@ async function handleChat(req, callbacks = {}) {
         'Content-Type': 'application/json',
         'Accept-Language': ACCEPT_LANGUAGE,
         'X-Region': 'overseas',
-        // 浏览器指纹 header（z.ai CDN 用这些判断是否真实浏览器，缺失会 403/405）
         'Accept': '*/*',
         'Origin': 'https://chat.z.ai',
         'Referer': `https://chat.z.ai/c/${chatId}`,
