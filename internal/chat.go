@@ -114,6 +114,60 @@ func extractLatestUserContent(messages []Message) string {
 	return ""
 }
 
+// mergeSystemIntoFirstUser 把所有 role:system 消息提取出来，拼到第一条 user
+// 消息前面。z.ai 会覆盖客户端的 system 消息，导致 system prompt 丢失；但 user
+// 消息会被保留，所以把 system 内容塞进 user 消息开头能生效。
+// 多条 system 用换行拼接；保留原文，不做格式化。没有 system 或没有 user 时原样返回。
+func mergeSystemIntoFirstUser(messages []Message) []Message {
+	// 收集所有 system 消息内容
+	var sysParts []string
+	firstUserIdx := -1
+	out := make([]Message, 0, len(messages))
+	for i, msg := range messages {
+		if msg.Role == "system" {
+			text, _ := msg.ParseContent()
+			if strings.TrimSpace(text) != "" {
+				sysParts = append(sysParts, text)
+			}
+			continue // 跳过 system，不放进 out
+		}
+		if firstUserIdx < 0 && msg.Role == "user" {
+			firstUserIdx = len(out) // 记录 out 里的位置（system 已被剔除）
+		}
+		out = append(out, msg)
+		_ = i
+	}
+	if len(sysParts) == 0 || firstUserIdx < 0 {
+		// 没有 system 或没有 user，原样返回（但 out 可能已剔除 system——
+		// 没有 user 时 system 无处可塞，也只能丢弃）
+		if len(sysParts) == 0 {
+			return messages
+		}
+		return out
+	}
+	// 把 system 内容拼到第一条 user 消息前面。
+	// 多模态消息（content 是 []interface{}）只改文本部分，保留图片/视频部分。
+	sysText := strings.Join(sysParts, "\n\n")
+	prefixed := "[System Instructions]\n" + sysText + "\n[/System Instructions]\n\n"
+	u := &out[firstUserIdx]
+	switch c := u.Content.(type) {
+	case string:
+		u.Content = prefixed + c
+	case []interface{}:
+		// 多模态：找到第一个 text part 前面插，没有 text part 就加一个
+		newContent := make([]interface{}, 0, len(c)+1)
+		newContent = append(newContent, map[string]interface{}{"type": "text", "text": prefixed})
+		newContent = append(newContent, c...)
+		u.Content = newContent
+	case nil:
+		u.Content = prefixed
+	default:
+		// 其它类型：转字符串拼接
+		u.Content = prefixed + fmt.Sprintf("%v", c)
+	}
+	return out
+}
+
 func extractAllMediaURLs(messages []Message) (imageURLs, videoURLs []string) {
 	for _, msg := range messages {
 		_, imgs, vids := msg.ParseContentFull()
@@ -1066,6 +1120,10 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 只在传统 chat 模式（无 agent flag）时才注入工具 prompt
 	// 工具调用：通过 prompt injection 让模型输出 XML 工具调用，
 	// 我们在响应里解析回 OpenAI 格式 tool_calls。
+	// 系统提示词：z.ai 会覆盖客户端的 role:system 消息，导致 system prompt 丢失。
+	// 把所有 system 消息提取出来，拼到第一条 user 消息前面（z.ai 保留 user 消息）。
+	messages = mergeSystemIntoFirstUser(messages)
+
 	if len(req.Tools) > 0 {
 		// FORCE_TOOL_CHOICE_REQUIRED：把没指定 tool_choice / auto 的请求升级为 required
 		toolChoice := req.ToolChoice
