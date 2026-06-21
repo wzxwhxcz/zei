@@ -139,6 +139,7 @@ func main() {
 	})))
 	http.HandleFunc("/admin/api/tokens/validate", corsMiddleware(loggingMiddleware(internal.HandleAdminTokenValidate)))
 	http.HandleFunc("/admin/api/tokens/bulk", corsMiddleware(loggingMiddleware(internal.HandleAdminTokenBulk)))
+	http.HandleFunc("/admin/api/tokens/unblock", corsMiddleware(loggingMiddleware(internal.HandleAdminTokenUnblock)))
 
 	// API Keys
 	http.HandleFunc("/admin/api/keys", corsMiddleware(loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {

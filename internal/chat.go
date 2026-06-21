@@ -828,6 +828,18 @@ func isTransientError(msg string) bool {
 		strings.Contains(m, "RATE_LIMIT")
 }
 
+// isCDNBlock 判断错误是否为「CDN 边缘拦截」（405/403）。
+// 这类错误是 token 级别（阿里云 ESA CDN 对 URL query 里某些 JWT 拦截），
+// 换 token 重试有效，且应标记当前 token 熔断。
+// 错误格式形如："full-proxy /v1/chat status 405: <!doctypehtml..."
+func isCDNBlock(msg string) bool {
+	m := strings.ToUpper(msg)
+	return strings.Contains(m, "STATUS 405") ||
+		strings.Contains(m, "STATUS 403") ||
+		strings.Contains(m, "STATUS:405") ||
+		strings.Contains(m, "STATUS:403")
+}
+
 func (u *UpstreamData) GetEditContent() string {
 	editContent := u.Data.EditContent
 	if editContent == "" {
@@ -1107,6 +1119,12 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			LogError("Upstream request failed (attempt %d): %v", attempt+1, err)
 			lastError = err.Error()
+			// 405/403 = 阿里云 ESA CDN 对该 token（URL query 里的 JWT）边缘拦截。
+			// 标记当前 token 熔断，换下一个 token 重试。实测 ~25% 间歇性 405，
+			// 换 token 后下个请求成功，证明是 token 级别拦截。
+			if isCDNBlock(lastError) {
+				GetTokenManager().MarkTokenBlocked(token, "405/403 CDN拦截")
+			}
 			continue
 		}
 

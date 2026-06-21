@@ -272,24 +272,64 @@ func HandleAdminTokens(w http.ResponseWriter, r *http.Request) {
 
 	managed := GetTokenManager().ListTokens()
 	managedTokens := make([]map[string]interface{}, 0, len(managed))
+	blockedCount := 0
 	for _, info := range managed {
 		entry := map[string]interface{}{
-			"token_full": info.Token,
-			"masked":     maskToken(info.Token),
-			"email":      info.Email,
-			"user_id":    info.UserID,
-			"valid":      info.Valid,
-			"use_count":  info.UseCount,
+			"token_full":   info.Token,
+			"masked":       maskToken(info.Token),
+			"email":        info.Email,
+			"user_id":      info.UserID,
+			"valid":        info.Valid,
+			"use_count":    info.UseCount,
+			"blocked":      info.Blocked,
+			"block_reason": info.BlockReason,
+			"block_count":  info.BlockCount,
+		}
+		if info.Blocked {
+			blockedCount++
 		}
 		if !info.LastChecked.IsZero() {
 			entry["last_checked"] = info.LastChecked.Format(time.RFC3339)
+		}
+		if !info.BlockedAt.IsZero() {
+			entry["blocked_at"] = info.BlockedAt.Format(time.RFC3339)
 		}
 		managedTokens = append(managedTokens, entry)
 	}
 
 	adminWriteJSON(w, http.StatusOK, map[string]interface{}{
-		"tokens": managedTokens,
-		"total":  len(managedTokens),
+		"tokens":        managedTokens,
+		"total":         len(managedTokens),
+		"blocked_count": blockedCount,
+	})
+}
+
+// HandleAdminTokenUnblock POST /admin/api/tokens/unblock
+// 手动解封某 token（body: {"token": "eyJ..."} 或 {"masked": "eyJ...***"}）
+func HandleAdminTokenUnblock(w http.ResponseWriter, r *http.Request) {
+	if !adminAuth(r) {
+		adminWriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if r.Method != http.MethodPost {
+		adminWriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		adminWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if body.Token == "" {
+		adminWriteJSON(w, http.StatusBadRequest, map[string]string{"error": "token required"})
+		return
+	}
+	existed := GetTokenManager().UnblockToken(body.Token)
+	adminWriteJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":      true,
+		"existed": existed,
 	})
 }
 

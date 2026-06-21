@@ -26,6 +26,21 @@ type TokenInfo struct {
 	Valid       bool      `json:"valid"`
 	LastChecked time.Time `json:"last_checked"`
 	UseCount    int64     `json:"use_count"`
+
+	// ── 熔断标记（405/403 等上游 CDN 拦截）──
+	// 阿里云 ESA CDN 会针对某些 token（URL query 里的 JWT）在边缘直接 405。
+	// 被标记的 token 暂时跳过（GetToken 不返回），TTL 到期自动解封重试。
+	Blocked     bool      `json:"blocked"`
+	BlockReason string    `json:"block_reason,omitempty"`
+	BlockedAt   time.Time `json:"blocked_at,omitempty"`
+	BlockCount  int       `json:"block_count"` // 累计被标记次数（衡量 token 质量）
+}
+
+// tokenBlock 记录单个 token 的熔断状态（内存版，不依赖 Redis）。
+type tokenBlock struct {
+	reason  string
+	at      time.Time
+	expires time.Time // TTL 到期自动解封
 }
 
 // TokenManager 管理所有用户 token
@@ -41,6 +56,11 @@ type TokenManager struct {
 	multimodalCount int64 // 多模态请求计数
 	totalCalls      int64 // 累计调用次数
 	successCalls    int64 // 成功调用次数
+
+	// 内存熔断表：token -> tokenBlock。HF 等无 Redis 环境用这个。
+	// 有 Redis 时也写一份（双写），保证非 Redis 部署也能用。
+	blocks    map[string]*tokenBlock
+	blockTTL  time.Duration // 熔断时长（默认 10 分钟）
 }
 
 var (
@@ -52,11 +72,13 @@ var (
 func GetTokenManager() *TokenManager {
 	tokenOnce.Do(func() {
 		tokenManager = &TokenManager{
-			tokens:        make(map[string]*TokenInfo),
-			validTokens:   make([]string, 0),
-			dataDir:       "data",
+			tokens:      make(map[string]*TokenInfo),
+			validTokens: make([]string, 0),
+			dataDir:     "data",
 			checkInterval: 5 * time.Minute, // 每5分钟检查一次
-			stopChan:      make(chan struct{}),
+			stopChan:    make(chan struct{}),
+			blocks:      make(map[string]*tokenBlock),
+			blockTTL:    10 * time.Minute, // 默认熔断 10 分钟，到期自动解封重试
 		}
 	})
 	return tokenManager
@@ -461,9 +483,10 @@ func (tm *TokenManager) GetToken() string {
 	tm.currentIndex++
 
 	// 跳过熔断中的 token（最多试 n 次避免死循环）
+	// 同时支持 Redis（多实例）和内存表（无 Redis 部署）。
 	for attempt := 0; attempt < n; attempt++ {
 		token := tm.validTokens[(start+attempt)%n]
-		if RedisIsTokenFailed(token) {
+		if tm.isTokenBlockedLocked(token) {
 			continue
 		}
 		if info, exists := tm.tokens[token]; exists {
@@ -488,6 +511,94 @@ func (tm *TokenManager) RecordCall(success bool, isMultimodal bool) {
 	}
 	if isMultimodal {
 		atomic.AddInt64(&tm.multimodalCount, 1)
+	}
+}
+
+// MarkTokenBlocked 标记某 token 熔断（405/403 等上游 CDN 拦截）。
+// 熔断期内 GetToken 跳过该 token，TTL 到期自动解封（给 token 重试机会，
+// 因为 CDN 拦截可能是间歇的）。同时写 Redis（若启用）和内存表（双写）。
+func (tm *TokenManager) MarkTokenBlocked(token, reason string) {
+	if token == "" {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	now := time.Now()
+	// 内存表（非 Redis 部署的主路径）
+	tm.blocks[token] = &tokenBlock{
+		reason:  reason,
+		at:      now,
+		expires: now.Add(tm.blockTTL),
+	}
+	// 同步 Redis（若启用，多实例共享）
+	RedisMarkTokenFail(token)
+	// 同步 TokenInfo（后台展示用）
+	if info, ok := tm.tokens[token]; ok {
+		info.Blocked = true
+		info.BlockReason = reason
+		info.BlockedAt = now
+		info.BlockCount++
+	}
+	LogInfo("[TokenBlock] 标记熔断 token=%s reason=%s ttl=%v (累计%d次)",
+		maskToken(token), reason, tm.blockTTL, func() int {
+			if info, ok := tm.tokens[token]; ok {
+				return info.BlockCount
+			}
+			return 0
+		}())
+}
+
+// isTokenBlockedLocked 查询 token 是否在熔断期内（调用方持锁）。
+func (tm *TokenManager) isTokenBlockedLocked(token string) bool {
+	if token == "" {
+		return false
+	}
+	// Redis 优先（多实例一致）
+	if RedisIsTokenFailed(token) {
+		return true
+	}
+	b, ok := tm.blocks[token]
+	if !ok {
+		return false
+	}
+	// TTL 过期：删除并解封
+	if time.Now().After(b.expires) {
+		delete(tm.blocks, token)
+		if info, ok2 := tm.tokens[token]; ok2 {
+			info.Blocked = false
+			info.BlockReason = ""
+		}
+		return false
+	}
+	return true
+}
+
+// UnblockToken 手动解封某 token（后台用）。
+func (tm *TokenManager) UnblockToken(token string) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	_, existed := tm.blocks[token]
+	delete(tm.blocks, token)
+	if info, ok := tm.tokens[token]; ok {
+		info.Blocked = false
+		info.BlockReason = ""
+	}
+	return existed
+}
+
+// CleanupExpiredBlocks 清理过期的熔断记录（定时调用，避免 map 无限增长）。
+func (tm *TokenManager) CleanupExpiredBlocks() {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	now := time.Now()
+	for tok, b := range tm.blocks {
+		if now.After(b.expires) {
+			delete(tm.blocks, tok)
+			if info, ok := tm.tokens[tok]; ok {
+				info.Blocked = false
+				info.BlockReason = ""
+			}
+		}
 	}
 }
 
