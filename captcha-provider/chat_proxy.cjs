@@ -150,13 +150,22 @@ class NodeXHR {
         this._fire(2);
         this._fire(3);
         let chunks = [];
+        // 流式 UTF-8 解码器：正确处理 TCP 分包把多字节字符拆到两个 chunk 的情况。
+        // 之前用 chunk.toString('utf8') 逐块累加，会把被拆开的 UTF-8 序列（如中文
+        // 「期」的 3 字节被拆成 2+1）替换成 U+FFFD → 思考链里出现乱码。
+        // TextDecoder('utf-8', { stream: true }) 会缓冲不完整的尾字节，跨 chunk 拼接。
+        const decoder = new TextDecoder('utf-8');
         res.on('data', (chunk) => {
           chunks.push(chunk);
-          this.responseText += chunk.toString('utf8');
+          this.responseText += decoder.decode(chunk, { stream: true });
           if (this.onprogress) { try { this.onprogress(); } catch {} }
           this._fire(3);
         });
         res.on('end', () => {
+          // flush 解码器剩余缓冲（应为空，保险起见）
+          const tail = decoder.decode();
+          if (tail) this.responseText += tail;
+          // 最终用 Buffer.concat 重算一次，保证 responseText 完全正确（覆盖流式累加）
           this.responseText = Buffer.concat(chunks).toString('utf8');
           this._fire(4);
           if (this.onload) { try { this.onload(); } catch {} }

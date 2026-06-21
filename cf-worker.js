@@ -38,6 +38,14 @@ export default {
     const respHeaders = new Headers(resp.headers);
     respHeaders.delete('cf-ray');
     respHeaders.delete('cf-cache-status');
+    // 关键：CF Worker 的 fetch() 会自动解压 br/gzip 响应体，resp.body 已是明文。
+    // 但 resp.headers 里的 Content-Encoding 仍保留（如 "br"），下游（provider 的
+    // NodeXHR）看到这个头会误以为响应还是压缩的，可能尝试再次解压明文 → 字节损坏
+    // （表现：思考链 reasoning 里个别中文字符变成 U+FFFD 乱码）。
+    // 删掉这个头，让下游把 body 当明文处理。
+    respHeaders.delete('content-encoding');
+    // 同理 Content-Length 是压缩后的长度，跟解压后的明文长度不符，删掉避免下游截断。
+    respHeaders.delete('content-length');
 
     return new Response(resp.body, {
       status: resp.status,
