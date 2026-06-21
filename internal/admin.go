@@ -145,6 +145,9 @@ func HandleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// token 健康度统计（健康/被熔断/无效）
+	health := GetTokenManager().HealthStats()
+
 	adminWriteJSON(w, http.StatusOK, map[string]interface{}{
 		"version": "2.0.0",
 		"telemetry": map[string]interface{}{
@@ -163,6 +166,10 @@ func HandleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		"tokens": map[string]interface{}{
 			"managed_token_count": len(GetTokenManager().ListTokens()),
 			"valid_token_count":   telemetry.ValidTokens,
+			"healthy":             health.Healthy,
+			"blocked":             health.Blocked,
+			"invalid":             health.Invalid,
+			"total_block_count":   health.TotalBlockCount,
 		},
 		"api_keys": map[string]interface{}{
 			"total":      len(GetApiKeyManager().List()),

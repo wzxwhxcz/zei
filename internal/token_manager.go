@@ -602,6 +602,56 @@ func (tm *TokenManager) CleanupExpiredBlocks() {
 	}
 }
 
+// TokenHealthStats 返回 token 健康度统计（供后台 overview 展示）。
+//   - total:       管理的 token 总数
+//   - healthy:     有效且未被熔断（可正常用）
+//   - blocked:     当前被熔断（405/403 CDN 拦截，TTL 内自动解封）
+//   - invalid:     无效（校验失败/过期）
+//   - total_block_count: 累计触发熔断次数（衡量 token 池整体质量）
+type TokenHealthStats struct {
+	Total            int `json:"total"`
+	Healthy          int `json:"healthy"`
+	Blocked          int `json:"blocked"`
+	Invalid          int `json:"invalid"`
+	TotalBlockCount  int `json:"total_block_count"`
+}
+
+// HealthStats 计算 token 健康度统计。调用时清理一次过期熔断。
+func (tm *TokenManager) HealthStats() TokenHealthStats {
+	tm.CleanupExpiredBlocks()
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	st := TokenHealthStats{Total: len(tm.tokens)}
+	for _, info := range tm.tokens {
+		if !info.Valid {
+			st.Invalid++
+			continue
+		}
+		if tm.isTokenBlockedRLocked(info.Token) {
+			st.Blocked++
+		} else {
+			st.Healthy++
+		}
+		st.TotalBlockCount += info.BlockCount
+	}
+	return st
+}
+
+// isTokenBlockedRLocked 持读锁版本（HealthStats 用，避免升级锁）。
+func (tm *TokenManager) isTokenBlockedRLocked(token string) bool {
+	if token == "" {
+		return false
+	}
+	if RedisIsTokenFailed(token) {
+		return true
+	}
+	b, ok := tm.blocks[token]
+	if !ok {
+		return false
+	}
+	return time.Now().Before(b.expires)
+}
+
 // GetStats 获取统计数据
 func (tm *TokenManager) GetStats() TokenManagerStats {
 	tm.mu.RLock()

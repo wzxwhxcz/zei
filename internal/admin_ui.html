@@ -957,11 +957,20 @@ async function loadOverview() {
     const apiKeys = d.api_keys || {};
     const tokenN = tokens.managed_token_count || 0;
     const keyN = (apiKeys.total || 0) + (apiKeys.env_count || 0);
+    const healthy = tokens.healthy ?? 0;
+    const blocked = tokens.blocked ?? 0;
     $('tokenCount').textContent = tokenN;
     $('keyCount').textContent = keyN;
+    // token 健康度：健康(绿)/被熔断(橙)/无效(灰)
+    const healthParts = [];
+    if (healthy > 0) healthParts.push(`<span style="color:var(--green)">${healthy} 健康</span>`);
+    if (blocked > 0) healthParts.push(`<span style="color:var(--amber)">${blocked} 熔断</span>`);
+    const invalidN = tokens.invalid ?? 0;
+    if (invalidN > 0) healthParts.push(`<span style="color:var(--text-faint)">${invalidN} 无效</span>`);
+    const healthHtml = healthParts.length ? ` · ${healthParts.join(' · ')}` : '';
     $('footStatus').innerHTML = `
       <div class="row"><span class="dot ok"></span>运行中</div>
-      <div class="faint" style="margin-top:4px;font-size:11px;">${tokenN} z.ai token · ${keyN} api key</div>
+      <div class="faint" style="margin-top:4px;font-size:11px;">${tokenN} z.ai token${healthHtml} · ${keyN} api key</div>
     `;
   } catch (e) {
     console.error(e);
@@ -979,19 +988,35 @@ async function loadTokens() {
     if (tokens.length === 0) {
       tbody.innerHTML = '<tr><td colspan="6" class="empty">还没有添加 Z.AI Token，点击右上角"添加 Token"开始</td></tr>';
     } else {
-      tbody.innerHTML = tokens.map(t => `
+      tbody.innerHTML = tokens.map(t => {
+        // 状态徽章：有效/失效 + 熔断标记
+        let statusBadge;
+        if (!t.valid) {
+          statusBadge = '<span class="badge err">✗ 失效</span>';
+        } else if (t.blocked) {
+          const cnt = t.block_count > 1 ? ` ×${t.block_count}` : '';
+          statusBadge = `<span class="badge ok">✓ 有效</span> <span class="badge" style="background:var(--amber-soft);color:var(--amber)">⚠ 熔断${cnt}</span>`;
+        } else {
+          statusBadge = '<span class="badge ok">✓ 有效</span>';
+        }
+        // 熔断中的 token 多一个「解封」按钮
+        const unblockBtn = t.blocked
+          ? `<button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;color:var(--amber)" onclick="unblockToken('${escapeJs(t.token_full)}')">解封</button>`
+          : '';
+        return `
         <tr>
           <td>${escapeHtml(t.email || '—')}</td>
           <td class="cell-mono">${escapeHtml(t.user_id || '—')}</td>
           <td class="cell-mono">${escapeHtml(t.masked)}</td>
-          <td>${t.valid ? '<span class="badge ok">✓ 有效</span>' : '<span class="badge err">✗ 失效</span>'}</td>
+          <td>${statusBadge}</td>
           <td>${t.use_count}</td>
           <td>
+            ${unblockBtn}
             <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;" onclick="validateToken('${escapeJs(t.token_full)}')">验证</button>
             <button class="btn btn-danger" style="font-size:11px;padding:4px 8px;" onclick="deleteToken('${escapeJs(t.token_full)}', '${escapeJs(t.email || '')}')">删除</button>
           </td>
-        </tr>
-      `).join('');
+        </tr>`;
+      }).join('');
     }
     $('tokenCount').textContent = d.total || 0;
   } catch (e) { toast('加载 tokens 失败', 'err'); }
@@ -1054,6 +1079,23 @@ async function submitAddToken() {
     btn.textContent = '添加';
     $('addTokenErr').textContent = e.message;
   }
+}
+
+async function unblockToken(token) {
+  try {
+    const r = await fetch('/admin/api/tokens/unblock', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token }),
+    });
+    if (r.ok) {
+      toast('已解封，token 重新加入轮询');
+      loadTokens();
+      loadOverview();
+    } else {
+      toast('解封失败', 'err');
+    }
+  } catch (e) { toast('解封失败: ' + e.message, 'err'); }
 }
 
 async function deleteToken(token, email) {
