@@ -1180,11 +1180,20 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			LogError("Upstream request failed (attempt %d): %v", attempt+1, err)
 			lastError = err.Error()
-			// 405/403 = 阿里云 ESA CDN 对该 token（URL query 里的 JWT）边缘拦截。
-			// 标记当前 token 熔断，换下一个 token 重试。实测 ~25% 间歇性 405，
-			// 换 token 后下个请求成功，证明是 token 级别拦截。
+			// 405/403 = 阿里云 ESA CDN 边缘拦截。实测是间歇性的（好 token 也偶发），
+			// 换 token 最终能成功。两个动作：
+			//   1) 累积计数（连续多次才熔断，避免误杀好 token）——用于后台展示 token 质量
+			//   2) 退避后重试（给 CDN 限流窗口冷却，降低下次撞 405 概率）
 			if isCDNBlock(lastError) {
 				GetTokenManager().MarkTokenBlocked(token, "405/403 CDN拦截")
+				if attempt < maxRetries {
+					backoff := time.Duration(attempt+1) * 1500 * time.Millisecond // 1.5s, 3s, 4.5s...
+					if backoff > 8*time.Second {
+						backoff = 8 * time.Second
+					}
+					LogInfo("CDN 405, backing off %v before retry %d/%d", backoff, attempt+2, maxRetries+1)
+					time.Sleep(backoff)
+				}
 			}
 			continue
 		}
