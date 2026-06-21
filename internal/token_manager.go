@@ -29,11 +29,13 @@ type TokenInfo struct {
 
 	// ── 熔断标记（405/403 等上游 CDN 拦截）──
 	// 阿里云 ESA CDN 会针对某些 token（URL query 里的 JWT）在边缘直接 405。
-	// 被标记的 token 暂时跳过（GetToken 不返回），TTL 到期自动解封重试。
-	Blocked     bool      `json:"blocked"`
-	BlockReason string    `json:"block_reason,omitempty"`
-	BlockedAt   time.Time `json:"blocked_at,omitempty"`
-	BlockCount  int       `json:"block_count"` // 累计被标记次数（衡量 token 质量）
+	// 但 405 是间歇性的（好 token 也会偶发），所以用「连续失败计数」避免误杀：
+	// 只有连续 N 次 405 才真正熔断，成功一次就清零。
+	Blocked          bool      `json:"blocked"`
+	BlockReason      string    `json:"block_reason,omitempty"`
+	BlockedAt        time.Time `json:"blocked_at,omitempty"`
+	BlockCount       int       `json:"block_count"`        // 累计被熔断次数（衡量 token 质量）
+	ConsecutiveFails int       `json:"consecutive_fails"`  // 连续 405 次数（达阈值才熔断）
 }
 
 // tokenBlock 记录单个 token 的熔断状态（内存版，不依赖 Redis）。
@@ -78,7 +80,7 @@ func GetTokenManager() *TokenManager {
 			checkInterval: 5 * time.Minute, // 每5分钟检查一次
 			stopChan:    make(chan struct{}),
 			blocks:      make(map[string]*tokenBlock),
-			blockTTL:    10 * time.Minute, // 默认熔断 10 分钟，到期自动解封重试
+			blockTTL:    2 * time.Minute, // 熔断时长（短，间歇 405 恢复快）
 		}
 	})
 	return tokenManager
@@ -514,38 +516,57 @@ func (tm *TokenManager) RecordCall(success bool, isMultimodal bool) {
 	}
 }
 
-// MarkTokenBlocked 标记某 token 熔断（405/403 等上游 CDN 拦截）。
-// 熔断期内 GetToken 跳过该 token，TTL 到期自动解封（给 token 重试机会，
-// 因为 CDN 拦截可能是间歇的）。同时写 Redis（若启用）和内存表（双写）。
+// blockFailThreshold 连续失败多少次才真正熔断。
+// 405 是间歇性的（好 token 也会偶发），单次 405 不应熔断，否则运行一会儿
+// 所有 token 都会被误杀（实测同一 token 6 次请求 2 次 405）。
+const blockFailThreshold = 3
+
+// MarkTokenBlocked 记录一次 405/403 失败。连续达阈值才真正熔断。
+// 这是「累积」而非「立即」熔断：单次间歇 405 只 +1，连续 3 次才熔断，
+// 避免好 token 被误杀导致整个 token 池逐渐耗尽。
 func (tm *TokenManager) MarkTokenBlocked(token, reason string) {
 	if token == "" {
 		return
 	}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
+	info, ok := tm.tokens[token]
+	if !ok {
+		return
+	}
+	info.ConsecutiveFails++
+	if info.ConsecutiveFails < blockFailThreshold {
+		// 未达阈值：只计数，不熔断。下次 GetToken 仍可能轮到它。
+		LogDebug("[TokenBlock] %s 连续失败 %d/%d（未熔断）", maskToken(token), info.ConsecutiveFails, blockFailThreshold)
+		return
+	}
+	// 达阈值：真正熔断
 	now := time.Now()
-	// 内存表（非 Redis 部署的主路径）
+	info.ConsecutiveFails = 0 // 熔断后清零，解封时重新计数
+	info.Blocked = true
+	info.BlockReason = reason
+	info.BlockedAt = now
+	info.BlockCount++
 	tm.blocks[token] = &tokenBlock{
 		reason:  reason,
 		at:      now,
 		expires: now.Add(tm.blockTTL),
 	}
-	// 同步 Redis（若启用，多实例共享）
 	RedisMarkTokenFail(token)
-	// 同步 TokenInfo（后台展示用）
-	if info, ok := tm.tokens[token]; ok {
-		info.Blocked = true
-		info.BlockReason = reason
-		info.BlockedAt = now
-		info.BlockCount++
+	LogInfo("[TokenBlock] 熔断 token=%s reason=%s ttl=%v (累计%d次)",
+		maskToken(token), reason, tm.blockTTL, info.BlockCount)
+}
+
+// MarkTokenSuccess 记录一次成功，清零连续失败计数（间歇 405 后恢复）。
+func (tm *TokenManager) MarkTokenSuccess(token string) {
+	if token == "" {
+		return
 	}
-	LogInfo("[TokenBlock] 标记熔断 token=%s reason=%s ttl=%v (累计%d次)",
-		maskToken(token), reason, tm.blockTTL, func() int {
-			if info, ok := tm.tokens[token]; ok {
-				return info.BlockCount
-			}
-			return 0
-		}())
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if info, ok := tm.tokens[token]; ok && info.ConsecutiveFails > 0 {
+		info.ConsecutiveFails = 0
+	}
 }
 
 // isTokenBlockedLocked 查询 token 是否在熔断期内（调用方持锁）。

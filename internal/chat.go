@@ -1230,6 +1230,8 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		if result.Success && result.HasContent {
 			success = true
+			// 请求成功：清零该 token 的连续失败计数（间歇 405 后恢复）。
+			GetTokenManager().MarkTokenSuccess(token)
 			break
 		}
 
