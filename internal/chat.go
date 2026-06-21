@@ -1244,10 +1244,23 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 	pendingImageSearchMarkdown := ""
 	totalContentOutputLength := 0 // 记录已输出的 content 字符长度
 	hasTools := len(tools) > 0
+	diagHexDumped := false // 诊断用：只 dump 第一条 thinking 行的原始 hex
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		LogDebug("[Upstream] %s", line)
+
+		// 诊断：DEBUG 时，对第一条 thinking 行 dump 原始 hex，定位上游字节是否在到达
+		// scanner 前就已损坏（区分是 tls-client/代理 还是 后续 json 解析的问题）。
+		if Cfg.DebugLogging && !diagHexDumped && strings.Contains(line, `"phase":"thinking"`) {
+			diagHexDumped = true
+			hb := []byte(line)
+			n := len(hb)
+			if n > 400 {
+				n = 400
+			}
+			LogDebug("[Diag][UpstreamRawHex] len=%d first%d=%x", len(line), n, hb[:n])
+		}
 
 		if !strings.HasPrefix(line, "data: ") {
 			continue
@@ -1697,12 +1710,25 @@ func handleNonStreamResponse(w http.ResponseWriter, body io.ReadCloser, completi
 	thinkingFilter := &ThinkingFilter{}
 	searchRefFilter := NewSearchRefFilter()
 	hasThinking := false
+	diagHexDumped := false // 诊断用：只 dump 第一条 thinking 行的原始 hex
 	pendingSourcesMarkdown := ""
 	pendingImageSearchMarkdown := ""
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		LogDebug("[Upstream] %s", line)
+
+		// 诊断：DEBUG 时，对第一条 thinking 行 dump 原始 hex，定位上游字节是否在到达
+		// scanner 前就已损坏（区分是 tls-client/代理 还是 后续 json 解析的问题）。
+		if Cfg.DebugLogging && !diagHexDumped && strings.Contains(line, `"phase":"thinking"`) {
+			diagHexDumped = true
+			hb := []byte(line)
+			n := len(hb)
+			if n > 400 {
+				n = 400
+			}
+			LogDebug("[Diag][UpstreamRawHex] len=%d first%d=%x", len(line), n, hb[:n])
+		}
 
 		if !strings.HasPrefix(line, "data: ") {
 			continue
@@ -1932,10 +1958,23 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 	pendingImageSearchMarkdown := ""
 	totalContentOutputLength := 0
 	hasTools := len(tools) > 0
+	diagHexDumped := false // 诊断用：只 dump 第一条 thinking 行的原始 hex
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		LogDebug("[Upstream] %s", line)
+
+		// 诊断：DEBUG 时，对第一条 thinking 行 dump 原始 hex，定位上游字节是否在到达
+		// scanner 前就已损坏（区分是 tls-client/代理 还是 后续 json 解析的问题）。
+		if Cfg.DebugLogging && !diagHexDumped && strings.Contains(line, `"phase":"thinking"`) {
+			diagHexDumped = true
+			hb := []byte(line)
+			n := len(hb)
+			if n > 400 {
+				n = 400
+			}
+			LogDebug("[Diag][UpstreamRawHex] len=%d first%d=%x", len(line), n, hb[:n])
+		}
 
 		if !strings.HasPrefix(line, "data: ") {
 			continue
@@ -2390,12 +2429,25 @@ func handleNonStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser,
 	thinkingFilter := &ThinkingFilter{}
 	searchRefFilter := NewSearchRefFilter()
 	hasThinking := false
+	diagHexDumped := false // 诊断用：只 dump 第一条 thinking 行的原始 hex
 	pendingSourcesMarkdown := ""
 	pendingImageSearchMarkdown := ""
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		LogDebug("[Upstream] %s", line)
+
+		// 诊断：DEBUG 时，对第一条 thinking 行 dump 原始 hex，定位上游字节是否在到达
+		// scanner 前就已损坏（区分是 tls-client/代理 还是 后续 json 解析的问题）。
+		if Cfg.DebugLogging && !diagHexDumped && strings.Contains(line, `"phase":"thinking"`) {
+			diagHexDumped = true
+			hb := []byte(line)
+			n := len(hb)
+			if n > 400 {
+				n = 400
+			}
+			LogDebug("[Diag][UpstreamRawHex] len=%d first%d=%x", len(line), n, hb[:n])
+		}
 
 		if !strings.HasPrefix(line, "data: ") {
 			continue
