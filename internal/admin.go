@@ -522,7 +522,9 @@ func HandleAdminTestModel(w http.ResponseWriter, r *http.Request) {
 			adminWriteJSON(w, http.StatusBadGateway, map[string]string{"error": u.GetErrorMessage()})
 			return
 		}
-		if u.Data.DeltaContent != "" {
+		// 区分 phase：thinking 是模型内部思考链，不计入最终回复内容。
+		// 之前不区分 phase 把思考也拼进了 content，导致后台测试看到思考+答案混在一起。
+		if u.Data.DeltaContent != "" && u.Data.Phase != "thinking" {
 			content.WriteString(u.Data.DeltaContent)
 		}
 		if u.Data.Done {
