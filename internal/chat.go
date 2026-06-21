@@ -146,9 +146,12 @@ func mergeSystemIntoFirstUser(messages []Message) []Message {
 		return out
 	}
 	// 把 system 内容拼到第一条 user 消息前面。
+	// z.ai 会覆盖客户端的 system 角色，所以把 system 内容用 XML 标签包裹后
+	// 塞进第一条 user 消息（user 消息 z.ai 会保留）。GLM 对 XML 标签理解好，
+	// <system_prompt> 标签能让模型区分这是系统指令而非用户输入。
 	// 多模态消息（content 是 []interface{}）只改文本部分，保留图片/视频部分。
 	sysText := strings.Join(sysParts, "\n\n")
-	prefixed := "[System Instructions]\n" + sysText + "\n[/System Instructions]\n\n"
+	prefixed := "<system_prompt>\n" + sysText + "\n</system_prompt>\n\n"
 	u := &out[firstUserIdx]
 	switch c := u.Content.(type) {
 	case string:
