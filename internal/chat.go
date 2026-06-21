@@ -1187,9 +1187,11 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			if isCDNBlock(lastError) {
 				GetTokenManager().MarkTokenBlocked(token, "405/403 CDN拦截")
 				if attempt < maxRetries {
-					backoff := time.Duration(attempt+1) * 1500 * time.Millisecond // 1.5s, 3s, 4.5s...
-					if backoff > 8*time.Second {
-						backoff = 8 * time.Second
+					// 短退避：给 CDN 限流窗口一点冷却，但不至于让请求太慢。
+					// 之前 1.5s/3s/4.5s 太久（10 个请求平均 25s），改短。
+					backoff := time.Duration(attempt+1) * 500 * time.Millisecond // 0.5s, 1s, 1.5s...
+					if backoff > 3*time.Second {
+						backoff = 3 * time.Second
 					}
 					LogInfo("CDN 405, backing off %v before retry %d/%d", backoff, attempt+2, maxRetries+1)
 					time.Sleep(backoff)
