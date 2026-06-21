@@ -130,12 +130,19 @@ class NodeXHR {
     let attempt = 0;
 
     const trySend = () => {
+      const finalHeaders = { ...this._headers };
+      // User-Agent 兜底：没显式设就用浏览器 UA。
+      // Node 原生 https 默认发 "Node.js/x.x" → z.ai CDN 检测到非浏览器 UA 直接 405。
+      // 必须显式设成 Chrome UA，否则间歇性 405（CDN 抽样检测）。
+      if (!finalHeaders['User-Agent'] && !finalHeaders['user-agent']) {
+        finalHeaders['User-Agent'] = UA;
+      }
       const opts = {
         method: this._method,
         hostname: u.hostname,
         port: u.port || (u.protocol === 'https:' ? 443 : 80),
         path: u.pathname + u.search,
-        headers: { ...this._headers },
+        headers: finalHeaders,
       };
       // 挂代理
       const proxyEntry = proxyPool.nextAgent();
@@ -417,7 +424,7 @@ async function handleChat(req, callbacks = {}) {
     // 2) 预热 cookie + 建会话
     await xhrSend(window, 'GET', 'https://chat.z.ai/', null, null, 15000).catch(() => {});
     const newChat = await xhrSend(window, 'POST', 'https://chat.z.ai/api/v1/chats/new',
-      { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Accept-Language': ACCEPT_LANGUAGE, 'X-FE-Version': FE_VERSION },
+      { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Accept-Language': ACCEPT_LANGUAGE, 'X-FE-Version': FE_VERSION, 'User-Agent': UA },
       JSON.stringify({ chat: { title: (signature_prompt || 'hi').slice(0, 40) } }), 15000);
     let chatId = crypto.randomUUID();
     try { const p = JSON.parse(newChat.body); chatId = p.id || (p.data && p.data.id) || chatId; } catch {}
@@ -516,6 +523,7 @@ async function handleChat(req, callbacks = {}) {
         'Accept': '*/*',
         'Origin': 'https://chat.z.ai',
         'Referer': `https://chat.z.ai/c/${chatId}`,
+        'User-Agent': UA,
         'Sec-Fetch-Dest': 'empty',
         'Sec-Fetch-Mode': 'cors',
         'Sec-Fetch-Site': 'same-origin',
@@ -558,7 +566,7 @@ async function getCaptchaAndChatId(req) {
 
     // 2) 建 chatId（用 NodeXHR，只是 chats/new 不走风控）
     const newChat = await xhrSend(window, 'POST', 'https://chat.z.ai/api/v1/chats/new',
-      { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Accept-Language': ACCEPT_LANGUAGE, 'X-FE-Version': FE_VERSION },
+      { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Accept-Language': ACCEPT_LANGUAGE, 'X-FE-Version': FE_VERSION, 'User-Agent': UA },
       JSON.stringify({ chat: { title: 'hi' } }), 15000);
     let chatId = crypto.randomUUID();
     try { const p = JSON.parse(newChat.body); chatId = p.id || (p.data && p.data.id) || chatId; } catch {}
