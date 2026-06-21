@@ -845,6 +845,38 @@ func (u *UpstreamData) GetEditContent() string {
 	return editContent
 }
 
+// cleanReasoningUTF8 清洗思考链（reasoning）里的乱码。
+//
+// 现象：z.ai 上游对 reasoning/thinking 内容做了某种后处理，导致个别中文字符被替换成
+// 连续的 U+FFFD（替换符）。content 字段不受影响（恒为 0 个 FFFD），只有 reasoning 会坏。
+// 实测损坏模式：每个被破坏的原字 → 2 个连续 FFFD（ef bf bd ef bf bd）。
+//
+// 处理：把任意连续的 FFFD 块替换成单个 □（U+25A1），既保证 UTF-8 合法，又保留可读性
+// （读者知道这里原本有个字符）。同时清理掉残留的非法 UTF-8 字节。
+func cleanReasoningUTF8(s string) string {
+	if !strings.ContainsRune(s, '\uFFFD') {
+		return s
+	}
+	// 把连续的 U+FFFD 压缩成单个 □
+	var b strings.Builder
+	b.Grow(len(s))
+	runes := []rune(s)
+	i := 0
+	for i < len(runes) {
+		if runes[i] == '\uFFFD' {
+			// 跳过连续的 FFFD，输出一个 □
+			for i < len(runes) && runes[i] == '\uFFFD' {
+				i++
+			}
+			b.WriteRune('□')
+		} else {
+			b.WriteRune(runes[i])
+			i++
+		}
+	}
+	return b.String()
+}
+
 type ThinkingFilter struct {
 	hasSeenFirstThinking bool
 	buffer               string
@@ -1266,7 +1298,7 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 			}
 			thinkingFilter.lastPhase = "thinking"
 
-			reasoningContent := thinkingFilter.ProcessThinking(upstream.Data.DeltaContent)
+			reasoningContent := cleanReasoningUTF8(thinkingFilter.ProcessThinking(upstream.Data.DeltaContent))
 
 			if isNewThinkingRound && thinkingFilter.thinkingRoundCount > 1 && reasoningContent != "" {
 				reasoningContent = "\n\n" + reasoningContent
@@ -1706,7 +1738,7 @@ func handleNonStreamResponse(w http.ResponseWriter, body io.ReadCloser, completi
 			thinkingFilter.lastPhase = "thinking"
 
 			hasThinking = true
-			reasoningContent := thinkingFilter.ProcessThinking(upstream.Data.DeltaContent)
+			reasoningContent := cleanReasoningUTF8(thinkingFilter.ProcessThinking(upstream.Data.DeltaContent))
 			if reasoningContent != "" {
 				thinkingFilter.lastOutputChunk = reasoningContent
 				reasoningChunks = append(reasoningChunks, reasoningContent)
@@ -1765,7 +1797,7 @@ func handleNonStreamResponse(w http.ResponseWriter, body io.ReadCloser, completi
 			content = upstream.Data.DeltaContent
 		} else if upstream.Data.Phase == "answer" && editContent != "" {
 			if strings.Contains(editContent, "</details>") {
-				reasoningContent := thinkingFilter.ExtractIncrementalThinking(editContent)
+				reasoningContent := cleanReasoningUTF8(thinkingFilter.ExtractIncrementalThinking(editContent))
 				if reasoningContent != "" {
 					reasoningChunks = append(reasoningChunks, reasoningContent)
 				}
@@ -1957,7 +1989,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 			}
 			thinkingFilter.lastPhase = "thinking"
 
-			reasoningContent := thinkingFilter.ProcessThinking(upstream.Data.DeltaContent)
+			reasoningContent := cleanReasoningUTF8(thinkingFilter.ProcessThinking(upstream.Data.DeltaContent))
 
 			if isNewThinkingRound && thinkingFilter.thinkingRoundCount > 1 && reasoningContent != "" {
 				reasoningContent = "\n\n" + reasoningContent
@@ -2403,7 +2435,7 @@ func handleNonStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser,
 			thinkingFilter.lastPhase = "thinking"
 
 			hasThinking = true
-			reasoningContent := thinkingFilter.ProcessThinking(upstream.Data.DeltaContent)
+			reasoningContent := cleanReasoningUTF8(thinkingFilter.ProcessThinking(upstream.Data.DeltaContent))
 			if reasoningContent != "" {
 				thinkingFilter.lastOutputChunk = reasoningContent
 				reasoningChunks = append(reasoningChunks, reasoningContent)
@@ -2462,7 +2494,7 @@ func handleNonStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser,
 			content = upstream.Data.DeltaContent
 		} else if upstream.Data.Phase == "answer" && editContent != "" {
 			if strings.Contains(editContent, "</details>") {
-				reasoningContent := thinkingFilter.ExtractIncrementalThinking(editContent)
+				reasoningContent := cleanReasoningUTF8(thinkingFilter.ExtractIncrementalThinking(editContent))
 				if reasoningContent != "" {
 					reasoningChunks = append(reasoningChunks, reasoningContent)
 				}
