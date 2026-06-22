@@ -80,7 +80,8 @@ function nowVars() {
 const proxyPool = require('./proxy_pool.cjs');
 
 class NodeXHR {
-  constructor() {
+  constructor(cookieJar) {
+    this._cookieJar = cookieJar || null; // JSDOM CookieJar，用于存取 z.ai 安全 cookie
     this.readyState = 0;
     this.status = 0;
     this.statusText = '';
@@ -154,6 +155,13 @@ class NodeXHR {
         this.status = res.statusCode || 0;
         this.statusText = res.statusMessage || '';
         this._resHeaders = res.headers || {};
+        // 把 Set-Cookie 存进 CookieJar（z.ai 的 acw_tc/cdn_sec_tc 安全 cookie）。
+        // 后续请求（completions）从 jar 提取这些 cookie 带上，ESA 才放行。
+        if (this._cookieJar && res.headers['set-cookie']) {
+          for (const sc of res.headers['set-cookie']) {
+            try { this._cookieJar.setCookieSync(sc, 'https://chat.z.ai/'); } catch {}
+          }
+        }
         this._fire(2);
         this._fire(3);
         let chunks = [];
@@ -233,7 +241,10 @@ function createWindow() {
     virtualConsole: vc,
     cookieJar: new CookieJar(),
     userAgent: UA,
+    // 暴露 cookieJar 到 window，供 NodeXHR 提取阿里云安全 cookie（acw_tc/cdn_sec_tc）。
+    // 直连 z.ai 时 NodeXHR 不带这些 cookie → ESA 抽样拦截 405。
     beforeParse(window) {
+      window._cookieJar = dom.cookieJar;
       // 注意：不全局劫持 XMLHttpRequest。AliyunCaptcha SDK 依赖 JSDOM 原生 XHR 的完整实现，
       // 全局替换会导致 SDK 崩溃。只在 xhrSend/xhrSendStream 里用 NodeXHR 发 z.ai 请求。
       window.matchMedia = () => ({ matches:false, media:'', onchange:null, addListener(){}, removeListener(){}, addEventListener(){}, removeEventListener(){}, dispatchEvent(){return false;} });
@@ -318,10 +329,44 @@ async function initPool() {
   await refillPool();
 }
 
+// 从 JSDOM window 的 CookieJar 提取 cookie 字符串（异步）。
+// 预热阶段访问 z.ai 会拿到阿里云安全 cookie（acw_tc/cdn_sec_tc/ssxmod_itna），
+// 这些 cookie 对 ESA 通过风控至关重要。NodeXHR 绕过了 JSDOM 的 XHR（用原生 https），
+// 不会自动带 cookieJar 的 cookie，必须手动提取注入。
+function getCookiesForUrl(window, url) {
+  return new Promise((resolve) => {
+    const jar = window._cookieJar;
+    if (!jar || typeof jar.getCookies !== 'function') {
+      resolve('');
+      return;
+    }
+    // cookie 是 chat.z.ai 域的，即使请求经 CF Worker 转发，cookie 也应带上
+    // （CF Worker 透传 Cookie 头给 z.ai）。
+    try {
+      jar.getCookies(url, (err, cookies) => {
+        if (err || !cookies || !cookies.length) {
+          resolve('');
+          return;
+        }
+        resolve(cookies.map(c => `${c.key}=${c.value}`).join('; '));
+      });
+    } catch {
+      resolve('');
+    }
+  });
+}
+
 // 用 window 的 XHR 发请求，返回 {status, body, headers}
-function xhrSend(window, method, url, headers, body, timeoutMs = 60000) {
+async function xhrSend(window, method, url, headers, body, timeoutMs = 60000) {
+  // 注入 CookieJar 的 cookie（阿里云安全 cookie）
+  const cookieStr = await getCookiesForUrl(window, 'https://chat.z.ai/');
+  const finalHeaders = { ...(headers || {}) };
+  if (cookieStr && !finalHeaders['Cookie'] && !finalHeaders['cookie']) {
+    finalHeaders['Cookie'] = cookieStr;
+  }
+  headers = finalHeaders;
   return new Promise((resolve, reject) => {
-    const xhr = new NodeXHR();
+    const xhr = new NodeXHR(window._cookieJar);
     xhr.open(method, url);
     if (headers) for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
     xhr.onload = () => {
@@ -340,9 +385,14 @@ function xhrSend(window, method, url, headers, body, timeoutMs = 60000) {
 // onChunk(chunk)、onHeaders(status, headers) 在首个 progress/readyState=2 时触发一次，
 // resolve({status, headers, full}) 在 onload 时触发（full = 完整拼接）。
 // 适合上游 SSE：边收边 pipe 给 HTTP 响应，降低 time-to-first-token。
-function xhrSendStream(window, method, url, headers, body, { onChunk, onHeaders, timeoutMs = 300000 } = {}) {
+async function xhrSendStream(window, method, url, headers, body, { onChunk, onHeaders, timeoutMs = 90000 } = {}) {
+  // 注入 CookieJar 的 cookie（阿里云安全 cookie）
+  const cookieStr = await getCookiesForUrl(window, 'https://chat.z.ai/');
+  if (cookieStr) {
+    headers = { ...(headers || {}), Cookie: cookieStr };
+  }
   return new Promise((resolve, reject) => {
-    const xhr = new NodeXHR();
+    const xhr = new NodeXHR(window._cookieJar);
     xhr.open(method, url);
     if (headers) for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
     let sent = 0;            // 已 flush 的 responseText 长度
