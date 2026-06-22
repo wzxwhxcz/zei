@@ -241,10 +241,7 @@ function createWindow() {
     virtualConsole: vc,
     cookieJar: new CookieJar(),
     userAgent: UA,
-    // 暴露 cookieJar 到 window，供 NodeXHR 提取阿里云安全 cookie（acw_tc/cdn_sec_tc）。
-    // 直连 z.ai 时 NodeXHR 不带这些 cookie → ESA 抽样拦截 405。
     beforeParse(window) {
-      window._cookieJar = dom.cookieJar;
       // 注意：不全局劫持 XMLHttpRequest。AliyunCaptcha SDK 依赖 JSDOM 原生 XHR 的完整实现，
       // 全局替换会导致 SDK 崩溃。只在 xhrSend/xhrSendStream 里用 NodeXHR 发 z.ai 请求。
       window.matchMedia = () => ({ matches:false, media:'', onchange:null, addListener(){}, removeListener(){}, addEventListener(){}, removeEventListener(){}, dispatchEvent(){return false;} });
@@ -263,6 +260,9 @@ function createWindow() {
       window.OffscreenCanvas = window.OffscreenCanvas || class { constructor(w,h){this.width=w;this.height=h;} getContext(){return proto.getContext.call(this);} };
     },
   });
+  // 暴露 cookieJar 到 window，供 NodeXHR 提取阿里云安全 cookie（acw_tc/cdn_sec_tc）。
+  // 必须在 new JSDOM() 之后（beforeParse 回调里 dom 还没初始化，会 TDZ 报错）。
+  dom.window._cookieJar = dom.cookieJar;
   return dom.window;
 }
 
