@@ -532,7 +532,11 @@ async function handleChat(req, callbacks = {}) {
         'sec-ch-ua-platform': '"Windows"',
       },
       JSON.stringify(body),
-      { onChunk: callbacks.onChunk, onHeaders: callbacks.onHeaders, timeoutMs: 300000 });
+      // completions 超时：之前 300000(5分钟) 太长。如果 z.ai 卡住不返回任何字节，
+      // 这个请求会占用 JSDOM 窗口 5 分钟才超时释放。WINDOW_POOL_SIZE=3，3 个请求
+      // 同时卡住 → 后续请求全部排队等窗口 → 整个服务卡死（"运行久了卡死"根因）。
+      // GLM-5.2 思考+回复通常 30-60s，90s 足够；超时则快速失败让 Go 重试换 token。
+      { onChunk: callbacks.onChunk, onHeaders: callbacks.onHeaders, timeoutMs: 90000 });
 
     return resp;
   } finally {
